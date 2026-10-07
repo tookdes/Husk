@@ -16,23 +16,6 @@ step "fetch sources"
 step "dependencies: libffi glib pixman libucontext libslirp"
 ./scripts/build_ios.sh libffi glib pixman libucontext libslirp
 
-# build_gpu_ios.sh asks for cross-ios-darwin.meson, which no script generates.
-# build_ios.sh writes cross-darwin.meson, the file it describes (host system
-# darwin, subsystem ios), under a different name.
-cp build/ios-arm64/cross-darwin.meson build/ios-arm64/cross-ios-darwin.meson
-
-if [ ! -f build/ios-arm64/sysroot/lib/libANGLE-shared.dylib ]; then
-    step "ANGLE (EGL/GLES over Metal)"
-    ./scripts/build_angle_ios.sh
-fi
-
-if [ ! -f build/ios-arm64/sysroot/lib/libvirglrenderer.a ]; then
-    step "libepoxy + virglrenderer"
-    # build_ios.sh's cross environment, which the GPU script assumes is set.
-    PKG_CONFIG_LIBDIR="$HUSK_ROOT/build/ios-arm64/sysroot/lib/pkgconfig:$HUSK_ROOT/build/ios-arm64/sysroot/share/pkgconfig" \
-        ./scripts/build_gpu_ios.sh
-fi
-
 step "QEMU"
 ./scripts/build_ios.sh qemu
 
