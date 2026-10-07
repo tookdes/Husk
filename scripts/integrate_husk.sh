@@ -67,37 +67,39 @@ if "husk-brk.S" not in s:
 else:
     print("  tcg/meson.build: already wired")
 
-# ui/meson.build: the display bridge
+# ui/meson.build: the software display bridge and the legacy GL ABI stubs.
+#
+# This branch deliberately configures QEMU with --disable-opengl.  The Swift
+# app still links against Husk's public husk_display_gl_* symbols, so the stub
+# implementation must be compiled unconditionally in this software-only build.
+# Do not hide it behind QEMU's CONFIG_OPENGL source-set expression: Meson's
+# generated target did not pick that false branch up reliably in the UTM fork.
 p = q / "ui/meson.build"
 s = p.read_text()
-if "husk-display.c" not in s:
-    old = "system_ss.add(files(\n"
-    assert old in s, "ui/meson.build shape changed"
+old = "system_ss.add(files(\n"
+assert old in s, "ui/meson.build shape changed"
+changed = False
+if "'husk-display.c'," not in s:
     s = s.replace(old, old + "  'husk-display.c',\n", 1)
+    changed = True
+if "'husk-display-gl-stub.c'," not in s:
+    s = s.replace(old, old + "  'husk-display-gl-stub.c',\n", 1)
+    changed = True
+if changed:
     p.write_text(s)
-    print("  ui/meson.build: added husk-display.c")
+    print("  ui/meson.build: added software display + GL ABI stubs")
 else:
-    print("  ui/meson.build: already wired")
+    print("  ui/meson.build: software display + GL ABI stubs already wired")
 
-# husk-display-gl.c only builds with CONFIG_OPENGL, and it goes in the same
-# block as QEMU's own shader.c/console-gl.c so it inherits that condition.
+# Keep the real GL bridge in the OpenGL source set for a future legacy-GPU
+# experiment.  It is not compiled in the current --disable-opengl build.
 s = p.read_text()
 if "husk-display-gl.c" not in s:
     old_gl = "if_true: files('shader.c', 'console-gl.c'))"
     assert old_gl in s, "ui/meson.build GL block shape changed"
-    s = s.replace(old_gl, "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'), if_false: files('husk-display-gl-stub.c'))", 1)
+    s = s.replace(old_gl, "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'))", 1)
     p.write_text(s)
-    print("  ui/meson.build: added husk-display-gl.c (CONFIG_OPENGL)")
-else:
-    # Upgrade a previously-integrated tree too: software-only builds still need
-    # ABI-compatible public GL symbols for the Swift app to link.
-    old_husk = "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'))"
-    if old_husk in s:
-        s = s.replace(old_husk, "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'), if_false: files('husk-display-gl-stub.c'))", 1)
-        p.write_text(s)
-        print("  ui/meson.build: added software GL stubs")
-    else:
-        print("  ui/meson.build: GL bridge already wired")
+    print("  ui/meson.build: added real GL bridge under CONFIG_OPENGL")
 
 # system/meson.build: balloon control. It lives here rather than in ui/ because
 # it calls qmp_balloon(), which system/balloon.c defines.
