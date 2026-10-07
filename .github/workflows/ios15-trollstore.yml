@@ -20,6 +20,8 @@ jobs:
 
       - name: Install build tools
         run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
           brew install autoconf automake libtool meson ninja pkg-config xcodegen qemu
           rustup target add aarch64-apple-ios
 
