@@ -7,7 +7,7 @@ options:
     # said 16.4, and since nothing regenerated the project it was the .pbxproj
     # that shipped. Regenerating it would otherwise have raised the floor for
     # everyone as a side effect of adding one source file.
-    iOS: "16.4"
+    iOS: "15.0"
   createIntermediateGroups: true
 
 settings:
@@ -75,7 +75,7 @@ targets:
           - "$(inherited)"
           - "@executable_path/Frameworks"
         # Husk targets recent iPhones only; a real Android guest needs the RAM.
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
         # XcodeGen links the dylib by -l, so the linker needs a library search
         # path (not just the framework search path it infers from the file).
         LIBRARY_SEARCH_PATHS:
@@ -98,8 +98,6 @@ targets:
           # On-device pairing for Built-in StikJIT, built by scripts/build_rppairing_ios.sh.
           - "-lhusk_rppairing"
     dependencies:
-      # Built-in StikJIT's debugger process. Embedded into PlugIns/.
-      - target: HuskJITHelper
       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
         embed: true
@@ -175,66 +173,3 @@ targets:
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/edk2-aarch64-code.fd"
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-efi-vars-seed.fd"
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/lineage-vdb-seed.qcow2"
-
-    postBuildScripts:
-      - name: Embed StikJIT
-        # The helper links StikJIT; it lives here, in the app's Frameworks,
-        # because sideloaders re-sign frameworks there and left one inside the
-        # helper unsigned. Upstream's framework has no Info.plist, and installd
-        # refuses an embedded framework without one. Copy it in with a minimal
-        # plist rather than editing the vendored bundle, then sign it as the
-        # copy phase would.
-        script: |
-          set -e
-          SRC="$SRCROOT/Frameworks/StikJIT.xcframework/ios-arm64/StikJIT.framework"
-          DST="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
-          rm -rf "$DST"
-          mkdir -p "$(dirname "$DST")"
-          ditto "$SRC" "$DST"
-          rm -rf "$DST/Headers" "$DST/Modules"
-          PLIST="$DST/Info.plist"
-          if [ ! -f "$PLIST" ]; then
-            plutil -create xml1 "$PLIST"
-            plutil -insert CFBundleIdentifier -string "$PRODUCT_BUNDLE_IDENTIFIER.StikJIT" "$PLIST"
-            plutil -insert CFBundleExecutable -string StikJIT "$PLIST"
-            plutil -insert CFBundleName -string StikJIT "$PLIST"
-            plutil -insert CFBundlePackageType -string FMWK "$PLIST"
-            plutil -insert CFBundleInfoDictionaryVersion -string 6.0 "$PLIST"
-            plutil -insert CFBundleShortVersionString -string 1.9.0 "$PLIST"
-            plutil -insert CFBundleVersion -string 1.9.0 "$PLIST"
-            plutil -insert MinimumOSVersion -string 17.4 "$PLIST"
-            plutil -insert CFBundleSupportedPlatforms -array "$PLIST"
-            plutil -insert CFBundleSupportedPlatforms.0 -string iPhoneOS "$PLIST"
-          fi
-          if [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ] && [ "$CODE_SIGNING_ALLOWED" != "NO" ]; then
-            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$DST"
-          fi
-        basedOnDependencyAnalysis: false
-
-  # Built-in StikJIT's debugger (docs/06-built-in-jit.md). A process cannot
-  # synchronously debug itself, so StikJIT runs here and attaches to the app.
-  # iOS 26 only: the app falls back to StikDebug below that.
-  HuskJITHelper:
-    type: app-extension
-    platform: iOS
-    deploymentTarget: "26.0"
-    sources:
-      - path: HuskJITHelper
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(HUSK_BUNDLE_IDENTIFIER).JITHelper
-        INFOPLIST_FILE: HuskJITHelper/Info.plist
-        GENERATE_INFOPLIST_FILE: NO
-        APPLICATION_EXTENSION_API_ONLY: YES
-        CODE_SIGN_STYLE: Automatic
-        TARGETED_DEVICE_FAMILY: "1"
-        # StikJIT.framework, in the app's Frameworks (the app target's Embed StikJIT).
-        LD_RUNPATH_SEARCH_PATHS:
-          - "$(inherited)"
-          - "@executable_path/../../Frameworks"
-    dependencies:
-      # StikJIT 1.9.0 (MPL-2.0, with idevice under MIT), from
-      # github.com/StikDebug/StikJIT/releases/tag/1.9.0, unmodified. Linked
-      # here and embedded by the app target's Embed StikJIT.
-      - framework: Frameworks/StikJIT.xcframework
-        embed: false
