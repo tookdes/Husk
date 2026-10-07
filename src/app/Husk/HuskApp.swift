@@ -10,12 +10,22 @@ enum HuskOrientation {
     /// Allow only `new`, and turn the screen to it if it is not already there.
     @MainActor static func set(_ new: UIInterfaceOrientationMask) {
         mask = new
-        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
-            var vc = scene.keyWindow?.rootViewController
-            while let v = vc { v.setNeedsUpdateOfSupportedInterfaceOrientations(); vc = v.presentedViewController }
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: new)) { error in
-                HuskLog.log("ui", "orientation change refused: \(error.localizedDescription)")
+        if #available(iOS 16.0, *) {
+            for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+                var vc = scene.keyWindow?.rootViewController
+                while let v = vc {
+                    v.setNeedsUpdateOfSupportedInterfaceOrientations()
+                    vc = v.presentedViewController
+                }
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: new)) { error in
+                    HuskLog.log("ui", "orientation change refused: \(error.localizedDescription)")
+                }
             }
+        } else {
+            // iOS 15 has no scene geometry update API. Updating the app delegate's
+            // supported-orientation mask and asking UIKit to re-evaluate the current
+            // device orientation is the public legacy path.
+            UIViewController.attemptRotationToDeviceOrientation()
         }
     }
 }
