@@ -48,6 +48,16 @@ jobs:
           otool -l /tmp/husk-ipa/Payload/Husk.app/Husk | grep -A5 LC_BUILD_VERSION || true
           otool -l /tmp/husk-ipa/Payload/Husk.app/Frameworks/libqemu-aarch64-softmmu.dylib | grep -A5 LC_BUILD_VERSION || true
 
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-iOS15-build-logs
+          path: |
+            build/logs
+            /tmp/husk_ipa/build.log
+          if-no-files-found: ignore
+
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
