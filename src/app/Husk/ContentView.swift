@@ -418,7 +418,6 @@ struct GuestScreenView: View {
         // document picker is up, and an importer attached to a view that goes
         // away goes away with it.
         .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
         .sheet(isPresented: $showControls) {
             ControlsSheet(keyboard: $keyboard)
         }
