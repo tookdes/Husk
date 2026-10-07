@@ -215,7 +215,7 @@ struct DiscoverView: View {
                         Task { await manager.addSource(urlString: url) }
                     }
                     .disabled(newSourceURL.isEmpty)
-                    .fontWeight(.bold)
+                    .font(.body.bold())
                 }
             }
         }
