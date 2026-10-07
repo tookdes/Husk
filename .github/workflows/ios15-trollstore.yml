@@ -6,6 +6,10 @@ on:
       - ios15-trollstore
   workflow_dispatch:
 
+concurrency:
+  group: ios15-trollstore-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-15
