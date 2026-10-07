@@ -241,6 +241,15 @@ enum JITBootstrap {
         return true
     }
 
+    /// A debugger is only one way to obtain executable memory. On pre-TXM
+    /// systems (including the iOS 15 TrollStore target) dynamic-codesigning can
+    /// make MAP_JIT executable without a debugger attachment.
+    static var canExecuteJITCode: Bool {
+        if isDebuggerAttached { return true }
+        guard canGrantOwnJIT else { return false }
+        return mapJITWorks
+    }
+
     /// husk-jit.js as standard base64, which Built-in StikJIT's custom script takes.
     static var scriptBase64: String? {
         loadScript()?.data(using: .utf8)?.base64EncodedString()
