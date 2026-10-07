@@ -9,7 +9,7 @@ import SwiftUI
 struct JITCard: View {
     @ObservedObject private var jit = JITCoordinator.shared
 
-    private var isOn: Bool { JITBootstrap.isDebuggerAttached || JITBootstrap.debuggedFlag }
+    private var isOn: Bool { JITBootstrap.canExecuteJITCode }
 
     /// The way the card offers: StikJIT where Husk has it (iOS 26 and later), and otherwise whatever this device has -- TrollStore, a
     /// jailbreak -- since StikJIT cannot run on an iOS before 26.
