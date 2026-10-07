@@ -411,7 +411,7 @@ struct TLUnityAttemptView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -439,7 +439,7 @@ struct TLUnityAttemptView: View {
                 if devInfo {
                 HStack(spacing: 10) {
                     Button {
-                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
+                        withAnimation(.easeInOut(duration: 0.25)) { showLog.toggle() }
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: showLog ? "chevron.down" : "chevron.right")
@@ -466,7 +466,7 @@ struct TLUnityAttemptView: View {
                 .padding(.vertical, 8)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if !showLog { withAnimation(.snappy(duration: 0.25)) { showLog = true } }
+                    if !showLog { withAnimation(.easeInOut(duration: 0.25)) { showLog = true } }
                 }
 
                 }
@@ -679,7 +679,7 @@ struct TLCocosAttemptView: View {
                 Text(stats).font(.technical(11)).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
             }
             if devInfo {
-                Button { withAnimation(.snappy(duration: 0.25)) { showLog.toggle() } } label: {
+                Button { withAnimation(.easeInOut(duration: 0.25)) { showLog.toggle() } } label: {
                     Text(showLog ? "Hide log" : "Log").font(.system(size: 12, weight: .semibold))
                 }
                 .tint(.white)
