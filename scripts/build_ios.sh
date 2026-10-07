@@ -48,7 +48,14 @@ export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
 unset PKG_CONFIG_PATH
 
 banner() { printf '\n\033[0;32m=== %s ===\033[0m\n' "$*"; }
-fail()   { printf '\033[0;31m[FAIL] %s (see %s)\033[0m\n' "$1" "$2"; exit 1; }
+fail()   {
+    printf '\033[0;31m[FAIL] %s (see %s)\033[0m\n' "$1" "$2"
+    if [ -f "$2" ]; then
+        echo "----- last 120 lines of $2 -----" >&2
+        tail -n 120 "$2" >&2
+    fi
+    exit 1
+}
 
 done_stage() { [ -f "$STAMPS/$1" ]; }
 mark_stage() { touch "$STAMPS/$1"; }
