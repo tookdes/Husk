@@ -403,7 +403,7 @@ struct TranslationLayerTab: View {
     @State private var playing: TLApp?
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             Form {
                 // Everything here needs JIT, and StikJIT -- built into Husk -- is the way to get it.
                 Section {
@@ -421,7 +421,7 @@ struct TranslationLayerTab: View {
             .navigationTitle("Translation Layer")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button { importing = true } label: { Label("Add App", systemImage: "plus") }
                         .disabled(store.busy != nil)
                 }
@@ -979,7 +979,7 @@ struct TLClassicAttemptView: View {
     private var showLog: Bool { get { showLogSetting && devInfo } nonmutating set { showLogSetting = newValue } }
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -1023,7 +1023,7 @@ struct TLClassicAttemptView: View {
                 // is closed, so it cannot be part of what closes.
                 HStack(spacing: 10) {
                     Button {
-                        withAnimation(.snappy(duration: 0.25)) { showLog.toggle() }
+                        withAnimation(.easeInOut(duration: 0.25)) { showLog.toggle() }
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: showLog ? "chevron.down" : "chevron.right")
@@ -1053,7 +1053,7 @@ struct TLClassicAttemptView: View {
                 .padding(.vertical, 8)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if !showLog { withAnimation(.snappy(duration: 0.25)) { showLog = true } }
+                    if !showLog { withAnimation(.easeInOut(duration: 0.25)) { showLog = true } }
                 }
 
                 }
