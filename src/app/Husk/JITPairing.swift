@@ -94,7 +94,7 @@ import UserNotifications
         }
         beginBackground()
         deadline = Timer.scheduledTimer(withTimeInterval: Self.timeout, repeats: false) { _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 OnDevicePairing.shared.cancel(reason: "Pairing timed out. Try again when you are ready to pair from Settings.")
             }
         }
@@ -242,7 +242,7 @@ import UserNotifications
 
     private func beginBackground() {
         grace = UIApplication.shared.beginBackgroundTask(withName: "Husk pairing") {
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 let pairing = OnDevicePairing.shared
                 if pairing.continued == nil && pairing.active {
                     pairing.cancel(reason: "iOS stopped Husk in the background before pairing finished. "
@@ -260,7 +260,7 @@ import UserNotifications
         if registered != identifier {
             let ok = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { task in
                 guard let task = task as? BGContinuedProcessingTask else { task.setTaskCompleted(success: false); return }
-                MainActor.assumeIsolated { OnDevicePairing.shared.attach(task) }
+                Task { @MainActor in OnDevicePairing.shared.attach(task) }
             }
             guard ok else { log("register refused"); backgroundLimited = true; return }
             registered = identifier

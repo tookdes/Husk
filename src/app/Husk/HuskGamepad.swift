@@ -35,10 +35,14 @@ final class HuskGamepads: ObservableObject {
         // Input while Husk is in the background is not wanted: the game is paused then too.
         GCController.shouldMonitorBackgroundEvents = false
         NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sync() }
+            // Do not use MainActor.assumeIsolated here: NotificationCenter's
+            // main queue is the main thread, but older concurrency runtimes do
+            // not always treat that as the MainActor executor, and assumeIsolated
+            // then aborts the process.
+            Task { @MainActor in self?.sync() }
         }
         NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sync() }
+            Task { @MainActor in self?.sync() }
         }
         sync()
     }
@@ -66,7 +70,7 @@ final class HuskGamepads: ObservableObject {
         } else if timer == nil {
             // 120 times a second, on the main run loop in every mode so that scrolling elsewhere does not stop it.
             let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.poll() }
+                Task { @MainActor in self?.poll() }
             }
             RunLoop.main.add(t, forMode: .common)
             timer = t

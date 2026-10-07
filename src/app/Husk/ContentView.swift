@@ -588,7 +588,7 @@ struct AppIcon: View {
                 // minute of a session, and a row of grey glyphs reads as broken.
                 ZStack {
                     Theme.accentSoft
-                    Image(systemName: "app.dashed")
+                    Image(systemName: "square.dashed")
                         .font(.system(size: size * 0.42, weight: .light))
                         .foregroundStyle(Theme.accent.opacity(0.8))
                 }

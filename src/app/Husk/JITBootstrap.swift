@@ -143,13 +143,11 @@ enum JITBootstrap {
     /// kind.
     nonisolated(unsafe) static var lastFailure: String?
 
-    /// Whether a plain MAP_JIT mapping executes in this process.
+    /// Whether a plain MAP_JIT mapping is granted execute permission.
     ///
-    /// Not run on a TXM device: MAP_JIT memory cannot execute there, and the
-    /// probe is not harmless. With a debugger attached, its fault goes to the
-    /// debugger as a stop, not to the probe's signal guard. If StikDebug is not
-    /// answering, that stop freezes the app. Views must never trigger this probe
-    /// directly.
+    /// Soft probe only (mmap + vm_region). Not run on a TXM device. Views should
+    /// still prefer canExecuteJITCode / the cached mapJITResult rather than
+    /// calling this during body evaluation.
     static var mapJITWorks: Bool {
         if let known = mapJITResult { return known }
         let result: Bool
@@ -247,6 +245,13 @@ enum JITBootstrap {
     static var canExecuteJITCode: Bool {
         if isDebuggerAttached { return true }
         guard canGrantOwnJIT else { return false }
+        // TrollStore keeps dynamic-codesigning; jailbreaks that allow JIT mark
+        // the process debugged at launch. Both are enough on pre-TXM iOS without
+        // waiting on the MAP_JIT soft probe -- and without ever running an
+        // execute self-test from SwiftUI bring-up.
+        if isInstalledWithTrollStore || isJailbroken || debuggedAtLaunch {
+            return true
+        }
         return mapJITWorks
     }
 

@@ -120,7 +120,7 @@ struct DiscoverView: View {
                 if let image = phase.image {
                     image.resizable().aspectRatio(contentMode: .fit)
                 } else if phase.error != nil {
-                    Image(systemName: "app.dashed").font(.title).foregroundStyle(.secondary)
+                    Image(systemName: "app").font(.title).foregroundStyle(.secondary)
                 } else {
                     ProgressView()
                 }

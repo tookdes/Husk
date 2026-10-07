@@ -130,23 +130,23 @@ private final class HelperRequest {
         shim.setRequestCompletionBlock { [weak self] _, items in
             let info = (items?.first as? NSExtensionItem)?.userInfo
             let payload = info?[HuskJITRequest.Response.itemKey] as? Data
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.returned(payload) } }
+            Task { @MainActor in self?.returned(payload) }
         }
         shim.setRequestCancellationBlock { [weak self] _, error in
             let message = error?.localizedDescription ?? "the request was cancelled"
-            DispatchQueue.main.async { MainActor.assumeIsolated {
+            Task { @MainActor in
                 self?.end(.failure(Self.error(5, "Husk's JIT helper stopped: \(message)")))
-            } }
+            }
         }
         shim.setRequestInterruptionBlock { [weak self] _ in
-            DispatchQueue.main.async { MainActor.assumeIsolated {
+            Task { @MainActor in
                 self?.end(.failure(Self.error(6, "Husk's JIT helper stopped unexpectedly. Try again.")))
-            } }
+            }
         }
         let item = NSExtensionItem()
         item.userInfo = [HuskJITRequest.itemKey: data]
         shim.beginExtensionRequest(withInputItems: [item]) { [weak self] uuid in
-            DispatchQueue.main.async { MainActor.assumeIsolated {
+            Task { @MainActor in
                 guard let self else { return }
                 guard let uuid else {
                     self.end(.failure(Self.error(7, "Husk's JIT helper did not start. Reinstall Husk, and "
@@ -156,7 +156,7 @@ private final class HelperRequest {
                 HuskLog.log("jit-helper", "\(self.operation): started \(identifier) as pid "
                                         + "\(self.shim.pid(forRequestIdentifier: uuid))")
                 started()
-            } }
+            }
         }
     }
 

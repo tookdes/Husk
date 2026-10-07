@@ -133,7 +133,7 @@ struct OnboardingView: View {
                              + "available. Off means you start it yourself.",
                        isOn: $autoStart)
 
-                choice(icon: "rectangle.landscape.rotate", title: "Landscape screen",
+                choice(icon: "rotate.right", title: "Landscape screen",
                        detail: "Gives Android a landscape screen, which games fill "
                              + "properly. Portrait apps get letterboxed instead.",
                        isOn: $landscape)
