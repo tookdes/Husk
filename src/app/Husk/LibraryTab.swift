@@ -74,7 +74,7 @@ struct LibraryTab: View {
             .autocorrectionDisabled()
             .textInputAutocapitalization(.never)
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
                     // Android itself, from the library, whenever it is up. It used to be
                     // reachable only while it was starting, or by opening an app -- so once
                     // it was ready there was no way to simply look at it.
@@ -116,16 +116,16 @@ struct LibraryTab: View {
                     ProgressView(value: Double(runner.bootProgress), total: 100)
                 } else {
                     Text(started ? host.status
-                                 : JITBootstrap.isDebuggerAttached
+                                 : JITBootstrap.canExecuteJITCode
                                    ? "Your apps are here; start it to open them."
-                                   : "Needs JIT. StikJIT is built in — the recommended way.")
+                                   : "Needs executable JIT memory. TrollStore can provide it on this iOS version.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
             }
             Spacer(minLength: 6)
-            Button(started ? "Show" : JITBootstrap.isDebuggerAttached ? "Start" : "Enable JIT") {
+            Button(started ? "Show" : JITBootstrap.canExecuteJITCode ? "Start" : "Enable JIT") {
                 if started { onOpenGuest() } else { onStartAndroid() }
             }
             .buttonStyle(.borderedProminent)
