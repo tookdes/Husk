@@ -303,9 +303,12 @@ final class QemuRunner: ObservableObject {
     /// Opt-in, because turning it on invalidates any snapshot saved without one
     /// and therefore costs a single cold boot before it pays for itself.
     nonisolated static var gpuModeEnabled: Bool {
-        // Absent means GPU: bool(forKey:) answers false for a key nobody
-        // has set, which quietly made the slow renderer the default.
-        UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
+        // The current ANGLE build has a 16.4 minimum OS. Keep the first iOS 15
+        // bring-up on the software framebuffer so dyld never needs to load it.
+        if #available(iOS 16.4, *) {
+            return UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
+        }
+        return false
     }
 
     /// Which display device the saved machine was built around.
