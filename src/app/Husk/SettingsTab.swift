@@ -8,7 +8,7 @@ struct SettingsTab: View {
         NavigationView {
             List {
                 Section {
-                    NavigationLink { AboutSettings() } label: { appCard }
+                    NavigationLink(destination: AboutSettings()) { appCard }
                 }
 
                 Section {
@@ -52,7 +52,7 @@ struct SettingsTab: View {
 
     private func row<D: View>(_ destination: D, _ icon: String, _ tint: Color,
                               _ title: String, _ subtitle: String) -> some View {
-        NavigationLink { destination } label: {
+        NavigationLink(destination: destination) {
             Label {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
