@@ -102,14 +102,9 @@ elif [ -n "$EXE" ]; then
     printf "  ok       %-28s %s\n" "executable present" "$EXE"
 fi
 
-# Both dylibs must be embedded, or the app dies at launch with a dyld error.
-#
-# ANGLE is checked here because it was not, and an IPA shipped without it: the
-# app reached qemu_egl_init_dpy_cocoa and aborted with "Couldn't open
-# @rpath/libANGLE-shared.dylib". Everything else in this validation passed. A
-# check that covers one of two required libraries is a check that reports
-# success on a bundle that cannot launch.
-for lib in libqemu-aarch64-softmmu.dylib libANGLE-shared.dylib; do
+# The legacy bring-up intentionally omits ANGLE and virgl. Only QEMU is a
+# required embedded dylib; iOS 15 uses Husk's software framebuffer.
+for lib in libqemu-aarch64-softmmu.dylib; do
     if [ ! -f "$APP/Frameworks/$lib" ]; then
         echo "  MISSING  Frameworks/$lib" >&2
         rc=1
