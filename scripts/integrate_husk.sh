@@ -33,6 +33,7 @@ cp "$HUSK_ROOT/src/ios-jit/husk-display.c" \
 
 echo "[cp  ] GL display bridge -> ui/"
 cp "$HUSK_ROOT/src/ios-jit/husk-display-gl.c" \
+   "$HUSK_ROOT/src/ios-jit/husk-display-gl-stub.c" \
    "$HUSK_ROOT/src/ios-jit/husk-display-gl.h" "$Q/ui/"
 
 echo "[cp  ] audio backend -> audio/"
@@ -84,11 +85,19 @@ s = p.read_text()
 if "husk-display-gl.c" not in s:
     old_gl = "if_true: files('shader.c', 'console-gl.c'))"
     assert old_gl in s, "ui/meson.build GL block shape changed"
-    s = s.replace(old_gl, "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'))", 1)
+    s = s.replace(old_gl, "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'), if_false: files('husk-display-gl-stub.c'))", 1)
     p.write_text(s)
     print("  ui/meson.build: added husk-display-gl.c (CONFIG_OPENGL)")
 else:
-    print("  ui/meson.build: GL bridge already wired")
+    # Upgrade a previously-integrated tree too: software-only builds still need
+    # ABI-compatible public GL symbols for the Swift app to link.
+    old_husk = "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'))"
+    if old_husk in s:
+        s = s.replace(old_husk, "if_true: files('shader.c', 'console-gl.c', 'husk-display-gl.c'), if_false: files('husk-display-gl-stub.c'))", 1)
+        p.write_text(s)
+        print("  ui/meson.build: added software GL stubs")
+    else:
+        print("  ui/meson.build: GL bridge already wired")
 
 # system/meson.build: balloon control. It lives here rather than in ui/ because
 # it calls qmp_balloon(), which system/balloon.c defines.
