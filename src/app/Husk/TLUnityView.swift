@@ -496,7 +496,6 @@ struct TLUnityAttemptView: View {
             }
         }
         // Swipes near the edges are the game's: keep the system from taking them for itself.
-        .defersSystemGestures(on: .all)
         .onAppear { model.start() }
         .onDisappear { model.stop() }
     }
@@ -639,9 +638,7 @@ struct TLCocosAttemptView: View {
             }
         }
         .statusBarHidden(true)
-        .persistentSystemOverlays(.hidden)
         // Swipes near the edges are the game's.
-        .defersSystemGestures(on: .all)
         .onAppear {
             HuskOrientation.set(portrait ? .portrait : .landscape)
             UIApplication.shared.isIdleTimerDisabled = settings.keepAwake
