@@ -25,7 +25,7 @@ struct LibraryTab: View {
     private let columns = [GridItem(.adaptive(minimum: 104), spacing: 12)]
 
     var body: some View {
-        NavigationStack(path: $router.library) {
+        NavigationView {
             ScrollView {
                 VStack(spacing: 16) {
                     if !host.isReady { machineStrip }
@@ -36,7 +36,7 @@ struct LibraryTab: View {
                     if !shown.isEmpty {
                         LazyVGrid(columns: columns, spacing: 12) {
                             ForEach(shown) { app in
-                                NavigationLink(value: app) {
+                                NavigationLink(destination: AppDetailView(app: app, onOpenGuest: onOpenGuest)) {
                                     AppCard(app: app, dimmed: !host.isReady)
                                 }
                                 .buttonStyle(CardButtonStyle())
@@ -85,9 +85,6 @@ struct LibraryTab: View {
                     }
                     Button { importing = true } label: { Label("Install APK", systemImage: "plus") }
                 }
-            }
-            .navigationDestination(for: AndroidHost.Package.self) { app in
-                AppDetailView(app: app, onOpenGuest: onOpenGuest)
             }
             .huskFilePicker(isPresented: $importing) { urls in
                 HuskLog.log("ui", "importing \(urls.count) file(s): "
