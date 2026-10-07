@@ -119,7 +119,7 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $showOnboarding) {
             OnboardingView {
                 showOnboarding = false
-                if Onboarding.autoStart, JITBootstrap.isDebuggerAttached {
+                if Onboarding.autoStart, JITBootstrap.canExecuteJITCode {
                     booting = true
                     start()
                 }
@@ -161,8 +161,8 @@ struct ContentView: View {
         // network round trip, and nothing on this screen should wait for it.
         Task { await guest.checkForUpdates() }
 
-        if !JITBootstrap.isDebuggerAttached {
-            HuskLog.log("ui", "no debugger attached; waiting for StikDebug")
+        if !JITBootstrap.canExecuteJITCode {
+            HuskLog.log("ui", "no executable JIT path yet")
             return
         }
 
@@ -207,7 +207,7 @@ struct ContentView: View {
     /// the action behind a button reads as a button that does nothing, so the
     /// JIT prompt is raised here instead.
     private func startFromLibrary() {
-        guard JITBootstrap.isDebuggerAttached else {
+        guard JITBootstrap.canExecuteJITCode else {
             HuskLog.log("ui", "start asked for without JIT; enabling with \(jit.resolvedMethod.title)")
             jit.enable()
             return
@@ -217,8 +217,8 @@ struct ContentView: View {
 
     private func start() {
         guard !started else { return }
-        guard JITBootstrap.isDebuggerAttached else { return }
-        HuskLog.log("ui", "CS_DEBUGGED set; starting QEMU")
+        guard JITBootstrap.canExecuteJITCode else { return }
+        HuskLog.log("ui", "JIT executable memory available; starting QEMU")
         // Take the JIT region at the last moment before QEMU, as well as before
         // the download. Whichever comes first wins; the second call is a no-op.
         //
