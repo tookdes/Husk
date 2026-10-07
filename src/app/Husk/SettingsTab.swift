@@ -469,7 +469,7 @@ struct JITSettings: View {
                 if let why = JITBootstrap.lastFailure {
                     Text(why).font(.caption).foregroundStyle(.orange)
                 }
-                if !JITBootstrap.isDebuggerAttached {
+                if !JITBootstrap.canExecuteJITCode {
                     Button {
                         jit.enable()
                     } label: {
