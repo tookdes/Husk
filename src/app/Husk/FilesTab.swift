@@ -66,7 +66,7 @@ struct DirectoryView: View {
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(path == FilesTab.root ? .large : .inline)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button { load() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                 Button { showImportSheet = true } label: { Label("Import", systemImage: "plus") }
             }
@@ -232,7 +232,7 @@ struct ImportSheet: View {
             .navigationTitle("Import")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .navigationBarTrailing) { Button("Done") { dismiss() } }
             }
         }
     }
