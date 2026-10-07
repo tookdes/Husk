@@ -8,11 +8,31 @@ SRC="$HUSK_ROOT/third_party/build"
 mkdir -p "$DL" "$SRC"
 
 fetch() {
-    local url="$1" file="$DL/$(basename "$1")"
+    local url="$1" file="$DL/$(basename "$1")" candidate
     if [ -s "$file" ]; then echo "[skip] $(basename "$file")"; return 0; fi
     echo "[get ] $(basename "$file")"
-    curl -fL --retry 3 --retry-delay 5 -o "$file.part" "$url" || { echo "[FAIL] $url"; return 1; }
-    mv "$file.part" "$file"
+
+    # ftp.gnu.org is occasionally unreachable from GitHub's macOS runners.
+    # GNU's mirror redirector is the preferred CI path; keep the canonical URL
+    # as a fallback so a mirror outage does not break the build either.
+    local candidates=("$url")
+    if [[ "$url" == https://ftp.gnu.org/gnu/* ]]; then
+        candidates=("https://ftpmirror.gnu.org/${url#https://ftp.gnu.org/gnu/}" "$url")
+    fi
+
+    rm -f "$file.part"
+    for candidate in "${candidates[@]}"; do
+        echo "      -> $candidate"
+        if curl -fL --connect-timeout 15 --max-time 180 \
+                --retry 2 --retry-delay 3 --retry-all-errors \
+                -o "$file.part" "$candidate"; then
+            mv "$file.part" "$file"
+            return 0
+        fi
+        rm -f "$file.part"
+    done
+    echo "[FAIL] $url"
+    return 1
 }
 
 unpack() {
