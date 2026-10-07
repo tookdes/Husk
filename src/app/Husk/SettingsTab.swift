@@ -60,7 +60,7 @@ struct SettingsTab: View {
                 }
             } icon: {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(tint.gradient)
+                    .fill(tint)
                     .frame(width: 30, height: 30)
                     .overlay {
                         Image(systemName: icon)
