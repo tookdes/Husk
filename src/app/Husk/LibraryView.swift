@@ -31,7 +31,7 @@ struct LibraryView: View {
                     Button { importing = true } label: { Image(systemName: "plus") }
                         .accessibilityLabel("Add APK")
                 }
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button { showLogs = true } label: {
                         Image(systemName: "doc.text.magnifyingglass")
                     }
