@@ -161,7 +161,7 @@ final class JITCoordinator: ObservableObject {
     /// Get a debugger attached with whichever method applies, or open the setup
     /// walkthrough when that method is not set up yet.
     func enable() {
-        guard !JITBootstrap.isDebuggerAttached else { return }
+        guard !JITBootstrap.canExecuteJITCode else { return }
         error = nil
         connectionProblem = nil
         switch resolvedMethod {
