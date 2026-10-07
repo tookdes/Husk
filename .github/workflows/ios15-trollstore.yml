@@ -25,8 +25,9 @@ jobs:
           brew install autoconf automake libtool meson ninja pkg-config xcodegen qemu
           rustup target add aarch64-apple-ios
 
-      - name: Cache Husk toolchain
-        uses: actions/cache@v4
+      - name: Restore Husk toolchain
+        id: husk-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             third_party/sources
@@ -35,7 +36,6 @@ jobs:
           key: husk-ios15-xcode26-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sources.sh', 'scripts/build_ios.sh', 'scripts/integrate_husk.sh', 'patches/*.patch', 'src/ios-jit/**') }}
           restore-keys: |
             husk-ios15-xcode26-${{ runner.os }}-${{ runner.arch }}-
-          save-always: true
 
       - name: Build IPA
         env:
@@ -51,6 +51,16 @@ jobs:
           plutil -p /tmp/husk-ipa/Payload/Husk.app/Info.plist | grep -E 'MinimumOSVersion|UIDeviceFamily'
           otool -l /tmp/husk-ipa/Payload/Husk.app/Husk | grep -A5 LC_BUILD_VERSION || true
           otool -l /tmp/husk-ipa/Payload/Husk.app/Frameworks/libqemu-aarch64-softmmu.dylib | grep -A5 LC_BUILD_VERSION || true
+
+      - name: Save Husk toolchain
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            third_party/sources
+            third_party/build
+            build/ios-arm64
+          key: ${{ steps.husk-cache.outputs.cache-primary-key }}
 
       - name: Upload build logs
         if: always()
