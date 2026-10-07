@@ -32,9 +32,10 @@ jobs:
             third_party/sources
             third_party/build
             build/ios-arm64
-          key: husk-ios15-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sources.sh', 'scripts/build_ios.sh', 'patches/*.patch') }}
+          key: husk-ios15-xcode26-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/sources.sh', 'scripts/build_ios.sh', 'scripts/integrate_husk.sh', 'patches/*.patch', 'src/ios-jit/**') }}
           restore-keys: |
-            husk-ios15-${{ runner.os }}-${{ runner.arch }}-
+            husk-ios15-xcode26-${{ runner.os }}-${{ runner.arch }}-
+          save-always: true
 
       - name: Build IPA
         env:
