@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 240
     steps:
       - name: Checkout
@@ -38,6 +38,7 @@ jobs:
         env:
           SDKMINVER: "15.0"
         run: |
+          xcodebuild -version
           chmod +x scripts/*.sh
           ./scripts/ci_build.sh build/Husk-iOS15-TrollStore.ipa
 
