@@ -710,9 +710,7 @@ struct TLAppReportView: View {
                             .foregroundStyle(Theme.textDim.opacity(0.5))
                     }
                 }
-                NavigationLink {
-                    TLAppSettingsView(app: app)
-                } label: {
+                NavigationLink(destination: TLAppSettingsView(app: app)) {
                     Label("Settings", systemImage: "gearshape")
                 }
             } footer: {
