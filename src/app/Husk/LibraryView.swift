@@ -17,7 +17,7 @@ struct LibraryView: View {
     private let columns = [GridItem(.adaptive(minimum: 92, maximum: 120), spacing: 24)]
 
     var body: some View {
-        NavigationStack {
+        NavigationView {
             Group {
                 if bridge.apps.isEmpty {
                     empty
