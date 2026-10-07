@@ -412,6 +412,16 @@ struct TranslationLayerTab: View {
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
 
+                NavigationLink(
+                    destination: destinationView,
+                    isActive: Binding(
+                        get: { destination != nil },
+                        set: { if !$0 { destination = nil } }
+                    )
+                ) { EmptyView() }
+                    .hidden()
+                    .frame(height: 0)
+
                 appsSection
                 if devInfo {
                     checksSection
@@ -431,13 +441,6 @@ struct TranslationLayerTab: View {
                           + urls.map(\.lastPathComponent).joined(separator: ", "))
                 store.add(urls)
             }
-            .navigationDestination(isPresented: Binding(get: { destination != nil }, set: { if !$0 { destination = nil } })) {
-                switch destination {
-                case .detail(let id)?: if let app = store.apps.first(where: { $0.id == id }) { TLAppReportView(app: app) }
-                case .settings(let id)?: if let app = store.apps.first(where: { $0.id == id }) { TLAppSettingsView(app: app) }
-                case nil: EmptyView()
-                }
-            }
             // A native-runtime game is swiped, and a sheet takes a swipe down for itself: it goes full screen.
             .fullScreenCover(item: $playing) { TLAttemptView(app: $0) }
             .onAppear { store.adoptDroppedAPKs() }
@@ -452,6 +455,26 @@ struct TranslationLayerTab: View {
     }
 
     private let columns = [GridItem(.adaptive(minimum: 104), spacing: 12)]
+
+    @ViewBuilder
+    private var destinationView: some View {
+        switch destination {
+        case .detail(let id)?:
+            if let app = store.apps.first(where: { $0.id == id }) {
+                TLAppReportView(app: app)
+            } else {
+                EmptyView()
+            }
+        case .settings(let id)?:
+            if let app = store.apps.first(where: { $0.id == id }) {
+                TLAppSettingsView(app: app)
+            } else {
+                EmptyView()
+            }
+        case nil:
+            EmptyView()
+        }
+    }
 
     private var appsSection: some View {
         Section {
