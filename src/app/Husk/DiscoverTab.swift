@@ -33,7 +33,7 @@ struct DiscoverView: View {
         .navigationBarTitleDisplayMode(.large)
         .searchable(text: $searchText, prompt: "Search \(totalAppCount) apps")
         .toolbar {
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button { Task { await manager.fetchSources() } } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
@@ -203,10 +203,10 @@ struct DiscoverView: View {
             .navigationTitle("Add Source")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") { newSourceURL = ""; showingAddSource = false }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Add") {
                         let url = newSourceURL
                         newSourceURL = ""
@@ -243,10 +243,10 @@ struct DiscoverView: View {
             .navigationTitle("Repositories")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button("Done") { showingSources = false }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button { showingSources = false; showingAddSource = true } label: {
                         Image(systemName: "plus")
                     }
