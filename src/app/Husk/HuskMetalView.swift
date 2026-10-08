@@ -28,7 +28,14 @@ final class HuskMetalView: MTKView {
         self.framebufferOnly = false
         self.isPaused = false
         self.enableSetNeedsDisplay = false
-        self.preferredFramesPerSecond = 60
+        // 30 Hz on the software path: the guest rarely exceeds that under TCG
+        // on A12Z, and presenting empty frames at 60 Hz still costs a Metal
+        // commit every vsync. Performance mode (default on iOS 15) opts in.
+        if #available(iOS 16.4, *), !QemuRunner.performanceMode {
+            self.preferredFramesPerSecond = 60
+        } else {
+            self.preferredFramesPerSecond = 30
+        }
         self.isMultipleTouchEnabled = false
         self.delegate = self
         self.clearColor = MTLClearColorMake(0, 0, 0, 1)

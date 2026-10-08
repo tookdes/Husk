@@ -189,6 +189,30 @@ final class QemuRunner: ObservableObject {
         UserDefaults.standard.object(forKey: "husk.soundDevice") as? Bool ?? true
     }
 
+    /// Host-side "make TCG hurt less" profile for the iOS 15 software path.
+    ///
+    /// Default ON below iOS 16.4: ANGLE/Metal GL is unavailable there, so every
+    /// pixel is software-rasterised inside the emulated CPU, and the 0.8.6
+    /// logs show the frame counter collapsing to 0 fps once System UI is
+    /// busy. This does not change the QEMU machine shape (so the shipped
+    /// snapshot still restores); it throttles host work and asks Android for
+    /// a smaller logical display + no animations once the bridge is up.
+    nonisolated static var performanceMode: Bool {
+        if let v = UserDefaults.standard.object(forKey: "husk.perfMode") as? Bool {
+            return v
+        }
+        if #available(iOS 16.4, *) { return false }
+        return true
+    }
+
+    /// Logical render scale applied via `wm size` (1.0 = snapshot resolution).
+    /// 0.75 ≈ 44% fewer pixels; 0.5 ≈ 75% fewer. Does not invalidate snapshots.
+    nonisolated static var performanceRenderScale: Double {
+        let v = UserDefaults.standard.double(forKey: "husk.perfRenderScale")
+        if v >= 0.4 && v <= 1.0 { return v }
+        return performanceMode ? 0.75 : 1.0
+    }
+
     /// Set for a run where sound was asked for but the only machine that can be
     /// restored was saved without it.
     ///
@@ -366,7 +390,7 @@ final class QemuRunner: ObservableObject {
             // Forcing it on (rather than "auto") also disables the RWX fallback,
             // so a genuine failure surfaces as itself instead of as a confusing
             // "Operation not permitted".
-            "-accel", "tcg,tb-size=256,thread=multi,split-wx=on",
+            "-accel", "tcg,tb-size=512,thread=multi,split-wx=on",
 
             "-kernel", "\(bundle)/vmlinuz-virt",
             "-initrd", "\(bundle)/initramfs-virt",
@@ -1096,7 +1120,7 @@ final class QemuRunner: ObservableObject {
         // cannot be walked back. Another app reaching a larger number does not
         // transfer -- clean file-backed pages are evictable and charged
         // differently.
-        let jitMiB = 256          // tb-size
+        let jitMiB = 512          // tb-size (matches prewarm)
         let qemuOverheadMiB = 750 // measured, not guessed
         // Real margin, in megabytes rather than a fraction. A fraction of what
         // was left quietly cost ~375 MiB the guest could have had; the run that
@@ -1230,7 +1254,7 @@ final class QemuRunner: ObservableObject {
             "-cpu", machineCpu,
             "-smp", "\(machineSmp)",
             "-m", "\(memMiB)",
-            "-accel", "tcg,tb-size=256,thread=multi,split-wx=on",
+            "-accel", "tcg,tb-size=512,thread=multi,split-wx=on",
 
             // The balloon was written earlier and never put on the machine, so
             // nothing could ever reclaim guest memory. With it present the guest
@@ -1687,9 +1711,14 @@ final class QemuRunner: ObservableObject {
             var lastAudioFrames: UInt64 = 0
             var lastAudioSilent: UInt64 = 0
             while true {
-                Thread.sleep(forTimeInterval: 5)
+                let interval: TimeInterval =
+                    (QemuRunner.performanceMode && tick >= 12) ? 30 : 5
+                Thread.sleep(forTimeInterval: interval)
                 tick += 1
-                HuskLog.logFootprint("t+\(tick * 5)s")
+                let elapsedSec = QemuRunner.performanceMode && tick > 12
+                    ? 60 + (tick - 12) * 30
+                    : tick * 5
+                HuskLog.logFootprint("t+\(elapsedSec)s")
 
                 // Frame rate, as a number rather than an impression. "Slow" is
                 // not something two people can compare across builds; frames per
@@ -1712,10 +1741,11 @@ final class QemuRunner: ObservableObject {
                           + "\(aSilent - lastAudioSilent) silent"
                 lastAudioFrames = aFrames
                 lastAudioSilent = aSilent
-                let rate = Double(delta) / 5.0
+                let seconds = interval
+                let rate = Double(delta) / seconds
                 DispatchQueue.main.async { [weak self] in self?.fps = rate }
-                HuskLog.log("perf", "guest produced \(delta) frames in 5s "
-                                  + "(\(String(format: "%.1f", Double(delta) / 5.0)) fps)"
+                HuskLog.log("perf", "guest produced \(delta) frames in \(Int(seconds))s "
+                                  + "(\(String(format: "%.1f", rate)) fps)"
                                   + audio)
 
                 // Save the machine once Android is genuinely up, and only once.
@@ -1743,7 +1773,8 @@ final class QemuRunner: ObservableObject {
                 // Under fifteen frames in five seconds means nothing is moving
                 // but a caret; three such windows means Android has stopped
                 // working, which is the moment to freeze it.
-                if delta < 15 { quietWindows += 1 } else { quietWindows = 0 }
+                // ~3 fps threshold, independent of the sample interval.
+                if rate < 3.0 { quietWindows += 1 } else { quietWindows = 0 }
                 let settled = QemuRunner.bootCompletedAt.map {
                     Date().timeIntervalSince($0) >= 30
                 } ?? false
@@ -1855,6 +1886,7 @@ final class QemuRunner: ObservableObject {
             var buf = [UInt8](repeating: 0, count: 64 * 1024)
             var totalRead = 0
             var reportedOpen = false
+            var mirroredLines = 0
 
             while true {
                 if fd < 0 {
@@ -1894,7 +1926,30 @@ final class QemuRunner: ObservableObject {
                     line = line.trimmingCharacters(in: .whitespaces)
                     if line.isEmpty { continue }
 
-                    HuskLog.log("guest", line)
+                    // Mirror every guest line into husk.log only when we can
+                    // afford it. On the iOS 15 CPU path the serial flood is
+                    // real host work (UTF-8 decode + ring + write) on a core
+                    // that also runs TCG; the 0.8.6 session wrote hundreds of
+                    // KB of guest printk through Swift while fps sat at 0.
+                    // The file chardev still captures everything; milestones
+                    // and a sparse sample still reach the unified log.
+                    let mirrorAll = !QemuRunner.performanceMode
+                    var isMilestone = false
+                    if !QemuRunner.didRestore {
+                        for (needle, _, _) in QemuRunner.bootMilestones {
+                            if line.contains(needle) { isMilestone = true; break }
+                        }
+                    }
+                    let interesting = isMilestone
+                        || line.contains("HUSK-")
+                        || line.contains("sys.boot_completed")
+                        || line.contains("Watchdog")
+                        || line.contains("FATAL")
+                        || line.contains("panic")
+                    mirroredLines += 1
+                    if mirrorAll || interesting || (mirroredLines % 40) == 0 {
+                        HuskLog.log("guest", line)
+                    }
 
                     // Say what the guest is doing, so a long first boot does
                     // not look like a hang.

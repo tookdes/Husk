@@ -688,7 +688,7 @@ final class GuestBridge {
                 //
                 // `-b crash` is a small dedicated ring, so this is cheap: a few
                 // lines every half minute, and only the ones not seen before.
-                if alive, ticks % 6 == 0, ticks > 0 {
+                if alive, ticks % 6 == 0, ticks > 0, !QemuRunner.performanceMode {
                     // Android's audio stack, at warning level and above. One
                     // sound effect played and then silence, with the guest
                     // queueing three buffers in three minutes -- whatever made
@@ -939,6 +939,7 @@ final class AndroidHost: ObservableObject {
                         // guest first answers is the moment to claim one.
                         GuestBridge.shared.holdConnection()
                         await self?.quietAbsentHardware()
+                        await self?.applyPerformanceProfileIfNeeded()
                         await self?.refreshPackages()
                         await MainActor.run { self?.dumpDiagnostics() }
                         return
@@ -1838,6 +1839,37 @@ final class AndroidHost: ObservableObject {
         HuskLog.log("crash", "---- \(lines.count) lines from Android's crash buffer ----")
         for line in lines.suffix(200) { HuskLog.log("crash", line) }
         HuskLog.log("crash", "---- end of crash buffer ----")
+    }
+
+    /// Apply the iOS 15 / Performance-mode host+guest tweaks once the shell answers.
+    ///
+    /// Safe against the shipped snapshot: `wm size` only changes the logical
+    /// display, and animation scales are settings, not machine shape.
+    func applyPerformanceProfileIfNeeded() async {
+        guard QemuRunner.performanceMode else {
+            HuskLog.log("perf", "performance mode off; leaving guest display alone")
+            return
+        }
+        let scale = QemuRunner.performanceRenderScale
+        HuskLog.log("perf", "applying performance profile (render scale \(scale))")
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            Task { @MainActor in
+                self.setRenderScale(scale) {
+                    cont.resume()
+                }
+            }
+        }
+        // Extra guest-side quieting beyond setRenderScale's animation kill.
+        for cmd in [
+            "settings put global window_animation_scale 0",
+            "settings put global transition_animation_scale 0",
+            "settings put global animator_duration_scale 0",
+            "settings put system accelerometer_rotation 0",
+            // Fewer background jobs fighting TCG for host cores.
+            "settings put global low_power 1",
+        ] {
+            _ = try? GuestBridge.shared.shell(cmd, timeout: 20)
+        }
     }
 
     /// Make Android draw fewer pixels.

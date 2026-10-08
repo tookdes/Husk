@@ -22,7 +22,7 @@ struct SettingsTab: View {
                 Section("General") {
                     row(DiscoverView(), "sparkle.magnifyingglass", .mint, "Discover", "Find apps in F-Droid and other repositories")
                     row(LibrarySettings(), "square.grid.2x2.fill", .blue, "Library", "Your apps and their icons")
-                    row(PerformanceSettings(), "speedometer", .orange, "Performance", "Renderer, sound")
+                    row(PerformanceSettings(), "speedometer", .orange, "Performance", "Speed, renderer, sound")
                     row(AppearanceSettings(), "paintbrush.fill", .pink, "Appearance", "Light or dark, accent colour, app icon")
                 }
 
@@ -134,32 +134,86 @@ struct LibrarySettings: View {
 
 struct PerformanceSettings: View {
     @ObservedObject private var runner = QemuRunner.shared
+    @ObservedObject private var host = AndroidHost.shared
     @State private var gpuMode =
         UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
     @State private var sound = UserDefaults.standard.bool(forKey: "husk.sound")
     @State private var soundDevice =
         UserDefaults.standard.object(forKey: "husk.soundDevice") as? Bool ?? true
+    @State private var perfMode = QemuRunner.performanceMode
+    @State private var renderScale = QemuRunner.performanceRenderScale
+
+    private var gpuAvailable: Bool {
+        if #available(iOS 16.4, *) { return true }
+        return false
+    }
 
     var body: some View {
         Form {
             Section {
-                Picker("Renderer", selection: $gpuMode) {
-                    Text("GPU").tag(true)
-                    Text("CPU").tag(false)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: gpuMode) { v in
-                    UserDefaults.standard.set(v, forKey: "husk.gpuMode")
-                    HuskLog.log("ui", v ? "GPU renderer selected" : "CPU renderer selected")
+                Toggle("Performance mode", isOn: $perfMode)
+                    .onChange(of: perfMode) { v in
+                        UserDefaults.standard.set(v, forKey: "husk.perfMode")
+                        HuskLog.log("ui", v ? "performance mode on" : "performance mode off")
+                        if host.isReady {
+                            let scale = v ? renderScale : 1.0
+                            host.setRenderScale(scale)
+                        }
+                    }
+                if perfMode {
+                    Picker("Render size", selection: $renderScale) {
+                        Text("Full").tag(1.0)
+                        Text("Balanced (75%)").tag(0.75)
+                        Text("Fast (50%)").tag(0.5)
+                    }
+                    .onChange(of: renderScale) { v in
+                        UserDefaults.standard.set(v, forKey: "husk.perfRenderScale")
+                        HuskLog.log("ui", "perf render scale \(v)")
+                        if host.isReady {
+                            host.setRenderScale(v)
+                        }
+                    }
                 }
             } header: {
-                Text("Renderer")
+                Text("TCG")
             } footer: {
-                Text(gpuMode
-                     ? "Android draws on the real GPU through Metal — about four times "
-                     + "the frame rate. This is the default."
-                     : "Every pixel is drawn by the emulated CPU. Much slower, and only "
-                     + "worth choosing if the GPU misbehaves.")
+                Text(perfMode
+                     ? "Lowers Android's logical resolution (scanout stays the same, "
+                     + "so the shipped snapshot still restores), turns animations off, "
+                     + "and throttles serial/log noise that steals CPU from the emulator. "
+                     + "Default on iPadOS 15."
+                     : "Full guest compositor load. Prefer this only when GL is available.")
+            }
+
+            if gpuAvailable {
+                Section {
+                    Picker("Renderer", selection: $gpuMode) {
+                        Text("GPU").tag(true)
+                        Text("CPU").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: gpuMode) { v in
+                        UserDefaults.standard.set(v, forKey: "husk.gpuMode")
+                        HuskLog.log("ui", v ? "GPU renderer selected" : "CPU renderer selected")
+                    }
+                } header: {
+                    Text("Renderer")
+                } footer: {
+                    Text(gpuMode
+                         ? "Android draws on the real GPU through Metal — about four times "
+                         + "the frame rate. This is the default."
+                         : "Every pixel is drawn by the emulated CPU. Much slower, and only "
+                         + "worth choosing if the GPU misbehaves.")
+                }
+            } else {
+                Section {
+                    DetailRow(label: "Renderer", value: "CPU (required on iOS 15)")
+                } header: {
+                    Text("Renderer")
+                } footer: {
+                    Text("The ANGLE/Metal GL stack in this build needs iOS 16.4+. "
+                       + "On iPadOS 15 every frame is software-rasterised inside TCG.")
+                }
             }
 
             Section {
@@ -168,6 +222,8 @@ struct PerformanceSettings: View {
                                  ? String(format: "%.0f fps", runner.fps) : "—")
                 DetailRow(label: "Guest screen",
                           value: "\(QemuRunner.lastGuestRes.w)×\(QemuRunner.lastGuestRes.h)")
+                DetailRow(label: "TCG",
+                          value: "MTTCG · 4 vCPU · tb-size 512 MiB · split-wx")
             } header: {
                 Text("Now")
             }
@@ -190,7 +246,8 @@ struct PerformanceSettings: View {
                 Text("Adds a sound device. While it is attached Android cannot be "
                    + "saved — QEMU refuses to snapshot a machine with one — so every "
                    + "launch boots from cold. Turning it on or off costs a cold boot "
-                   + "either way.")
+                   + "either way. On iPadOS 15, sound is held back automatically when "
+                   + "a no-sound snapshot is the only restorable machine.")
             }
         }
         .huskForm()
