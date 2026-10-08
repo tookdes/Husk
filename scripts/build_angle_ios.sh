@@ -127,7 +127,11 @@ nm -g "$DYLIB" | awk '$2=="T"{print $3}' | grep -E '^_EGL_' \
 # Don't alias names the dylib already exports.
 if [ -s "$ALIASES" ]; then
     nm -g "$DYLIB" | awk '$2=="T"{print $3}' | grep -E '^_egl' | sort -u > "$GPU/angle-existing-egl.txt" || true
-    awk 'NR==FNR{have[$1]=1; next} !($2 in have)' "$GPU/angle-existing-egl.txt" "$ALIASES" > "$ALIASES.tmp"
+    # (FILENAME, not NR==FNR: the existing-names file is usually empty, and
+    # with an empty first file NR==FNR holds for every alias line too.)
+    awk -v have_file="$GPU/angle-existing-egl.txt" \
+        'FILENAME==have_file{have[$1]=1; next} !($2 in have)' \
+        "$GPU/angle-existing-egl.txt" "$ALIASES" > "$ALIASES.tmp"
     mv "$ALIASES.tmp" "$ALIASES"
 fi
 echo "    $(wc -l < "$ALIASES" | tr -d ' ') aliases"
