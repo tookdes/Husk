@@ -210,9 +210,11 @@ final class JITCoordinator: ObservableObject {
                 log("TrollStore enabled JIT")
             } else {
                 status = nil
-                error = "TrollStore did not enable JIT. In TrollStore's Settings turn on URL Scheme, and make sure Husk was "
-                      + "installed through TrollStore (or is signed with get-task-allow)."
-                log("TrollStore did not enable JIT within a minute")
+                error = "TrollStore did not enable JIT. Turn on URL Scheme in TrollStore Settings. "
+                      + "If TrollStore showed status 3, that is ESRCH (process not found): open Husk "
+                      + "first, then tap Enable JIT here (do not use Open with JIT while Husk is closed). "
+                      + "Husk must keep running so RootHelper can ptrace it."
+                log("TrollStore did not enable JIT within a minute (status 3 = ESRCH is the common cause)")
                 showSetup = true
             }
         }

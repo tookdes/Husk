@@ -117,6 +117,24 @@ int pipe2(int fds[2], int flags)
  * emulator will actually run on. */
 #include "tcg/tcg-apple-jit.h"
 
+/* csops lives in libsystem; declare locally rather than pulling private headers. */
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+#ifndef CS_OPS_STATUS
+#define CS_OPS_STATUS 0
+#endif
+#ifndef CS_DEBUGGED
+#define CS_DEBUGGED 0x10000000u
+#endif
+
+static bool husk_cs_debugged(void)
+{
+    uint32_t flags = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) != 0) {
+        return false;
+    }
+    return (flags & CS_DEBUGGED) != 0;
+}
+
 /* Maximum verbosity by default: this path is nearly impossible to debug after the
  * fact on device, and every line here is printed at most a handful of times per
  * session. Goes to os_log (visible in Console.app) and stderr both. */
@@ -319,25 +337,38 @@ static bool husk_jit_selftest(const HuskDualMapping *m)
 
 /* ------------------------------------------------------------- allocation */
 
+static bool husk_page_is_executable(void *p);
+
 /*
  * Husk: take the JIT region early, before anything slow happens.
  *
- * StikDebug does not stay attached indefinitely. A first run downloads about
- * 1.1 GB of guest image before QEMU starts, and by the time qemu_init() reached
- * alloc_code_gen_buffer the debugger had let go:
+ * Two backends:
  *
- *   StikDebug is NOT servicing traps -- probe returned 0
- *   could not obtain 268435456 bytes of JIT memory
+ *   1. StikDebug trap servicer (TXM / iOS 26+): brk RPC -> RX pages from the
+ *      debugger, then a local RW vm_remap alias.
+ *   2. Legacy debugger JIT (pre-TXM, CS_DEBUGGED set by TrollStore enable-jit
+ *      or a real debugger): plain anonymous RX + RW mirror via vm_remap -- the
+ *      same shape UTM / Dolphin / PPSSPP use. MAP_JIT is optional and usually
+ *      unavailable without dynamic-codesigning (banned on A12+ iOS 15).
  *
- * Nothing can recover from that in-process: without a debugger there is no way
- * to get executable memory, and asking again later is exactly what does not
- * work. So the region is claimed at app launch, while the attachment is fresh,
- * and held until QEMU asks for it.
+ * StikDebug does not stay attached indefinitely, so claim once up front.
  */
+
+static HuskDualMapping husk_ios_jit_allocate_stikdebug(size_t bytes);
+static HuskDualMapping husk_ios_jit_allocate_legacy(size_t bytes);
 static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes);
 
 static HuskDualMapping husk_prewarmed;
 static bool husk_prewarm_done;
+static atomic_int g_mapjit_cached;          /* 0 unknown, 1 yes, -1 no */
+static atomic_int g_mapjit_cached_debugged; /* -1 unknown, 0/1 last CS_DEBUGGED */
+
+HUSK_EXPORT void husk_ios_jit_invalidate_probe_cache(void)
+{
+    atomic_store(&g_mapjit_cached, 0);
+    atomic_store(&g_mapjit_cached_debugged, -1);
+    HUSK_LOG("probe cache invalidated (re-check after CS_DEBUGGED change)");
+}
 
 HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes)
 {
@@ -364,21 +395,167 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes)
         return husk_prewarmed;
     }
     /*
-     * No second trap after a prewarm already went unanswered.
-     * Inside qemu_init there is even less chance StikDebug is listening, and a
-     * debugger that is attached but not answering keeps the whole process
-     * stopped on the brk, so the app freezes. Failing here lets region.c
-     * fall back to MAP_JIT, or lets qemu_init report the error.
+     * A failed prewarm used to refuse every later attempt ("not trapping
+     * again"). That was correct for unanswered StikDebug brks that freeze the
+     * process, but wrong once CS_DEBUGGED arrives afterwards and the legacy
+     * dual-map path becomes usable. Retry the full allocator; the StikDebug
+     * probe is guarded and returns 0 quickly when nothing services it.
      */
-    if (husk_prewarm_done) {
-        fprintf(stderr, "[husk-jit] prewarm failed earlier; not trapping again\n");
-        HuskDualMapping none = { NULL, NULL, 0 };
-        return none;
+    if (husk_prewarm_done && husk_prewarmed.rw_addr == NULL) {
+        fprintf(stderr, "[husk-jit] prewarm failed earlier; retrying allocate "
+                        "(legacy path may work now that CS_DEBUGGED is set)\n");
+        HuskDualMapping again = husk_ios_jit_allocate_real(bytes);
+        if (again.rw_addr) {
+            husk_prewarmed = again;
+        }
+        return again;
     }
     return husk_ios_jit_allocate_real(bytes);
 }
 
 static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
+{
+    HuskDualMapping region = husk_ios_jit_allocate_stikdebug(bytes);
+    if (region.rw_addr != NULL) {
+        return region;
+    }
+
+    HUSK_LOG("StikDebug path unavailable; trying legacy CS_DEBUGGED dual-map "
+             "(pre-TXM / TrollStore enable-jit)");
+    region = husk_ios_jit_allocate_legacy(bytes);
+    if (region.rw_addr != NULL) {
+        return region;
+    }
+
+    HUSK_LOG("no JIT backend produced executable memory (%zu bytes). On iOS 15 "
+             "pre-TXM, enable JIT with TrollStore (Open with JIT / "
+             "apple-magnifier://enable-jit) so CS_DEBUGGED is set, then retry. "
+             "On TXM devices, attach StikDebug with the Universal JIT script.",
+             bytes);
+    return region;
+}
+
+/*
+ * Mirror an RX (or RWX) region into a writable alias. QEMU emits through RW and
+ * executes through RX; tcg_splitwx_diff is rx - rw.
+ */
+static bool husk_dual_map_from_rx(void *rx, size_t bytes, HuskDualMapping *out)
+{
+    vm_address_t rw = 0;
+    vm_prot_t cur_prot = VM_PROT_NONE, max_prot = VM_PROT_NONE;
+    kern_return_t kr = vm_remap(mach_task_self(), &rw, (vm_size_t)bytes,
+                                /*mask=*/0, VM_FLAGS_ANYWHERE,
+                                mach_task_self(), (vm_address_t)rx,
+                                /*copy=*/FALSE, &cur_prot, &max_prot,
+                                VM_INHERIT_NONE);
+    if (kr != KERN_SUCCESS) {
+        HUSK_LOG("vm_remap failed for rx=%p size=%zu: %d (%s)",
+                 rx, bytes, (int)kr, mach_error_string(kr));
+        return false;
+    }
+
+    kr = vm_protect(mach_task_self(), rw, (vm_size_t)bytes, /*set_maximum=*/FALSE,
+                    VM_PROT_READ | VM_PROT_WRITE);
+    if (kr != KERN_SUCCESS) {
+        HUSK_LOG("vm_protect(RW) failed for rw=%p size=%zu: %d (%s)",
+                 (void *)rw, bytes, (int)kr, mach_error_string(kr));
+        vm_deallocate(mach_task_self(), rw, (vm_size_t)bytes);
+        return false;
+    }
+
+    out->rw_addr = (uint8_t *)rw;
+    out->rx_addr = (uint8_t *)rx;
+    out->size    = bytes;
+    return true;
+}
+
+/*
+ * Pre-TXM legacy path: with CS_DEBUGGED set, anonymous pages can be made
+ * executable without dynamic-codesigning / MAP_JIT. Prefer plain RX + RW
+ * mirror (UTM "bulletproof JIT"); fall back to MAP_JIT; finally RW then
+ * mprotect RX.
+ *
+ * Execute self-test runs ONLY when CS_DEBUGGED is set -- otherwise an unblessed
+ * execute is a process-killing SIGKILL on some pre-TXM devices, not a catchable
+ * fault.
+ */
+static HuskDualMapping husk_ios_jit_allocate_legacy(size_t bytes)
+{
+    HuskDualMapping region = { NULL, NULL, 0 };
+    const size_t page = 16384;
+    bytes = (bytes + page - 1) & ~(page - 1);
+
+    if (!husk_cs_debugged()) {
+        HUSK_LOG("legacy JIT: CS_DEBUGGED clear -- refusing to build/execute a "
+                 "probe (would risk AMFI SIGKILL). Ask TrollStore to enable-jit "
+                 "first.");
+        return region;
+    }
+
+    struct {
+        int prot;
+        int flags;
+        bool mprotect_rx;
+        const char *name;
+    } attempts[] = {
+        { PROT_READ | PROT_EXEC,              0,       false, "plain-RX" },
+        { PROT_READ | PROT_WRITE | PROT_EXEC, MAP_JIT, false, "MAP_JIT" },
+        { PROT_READ | PROT_WRITE,             0,       true,  "RW+mprotect-RX" },
+    };
+
+    for (size_t i = 0; i < sizeof(attempts) / sizeof(attempts[0]); i++) {
+        void *rx = mmap(NULL, bytes, attempts[i].prot,
+                        MAP_PRIVATE | MAP_ANON | attempts[i].flags, -1, 0);
+        if (rx == MAP_FAILED) {
+            HUSK_LOG("legacy JIT %s: mmap failed (%s)",
+                     attempts[i].name, strerror(errno));
+            continue;
+        }
+
+        if (attempts[i].mprotect_rx) {
+            if (mprotect(rx, bytes, PROT_READ | PROT_EXEC) != 0) {
+                HUSK_LOG("legacy JIT %s: mprotect(RX) failed (%s)",
+                         attempts[i].name, strerror(errno));
+                munmap(rx, bytes);
+                continue;
+            }
+        }
+
+        if (!husk_page_is_executable(rx)) {
+            HUSK_LOG("legacy JIT %s: kernel did not grant execute on %p",
+                     attempts[i].name, rx);
+            munmap(rx, bytes);
+            continue;
+        }
+
+        if (!husk_dual_map_from_rx(rx, bytes, &region)) {
+            munmap(rx, bytes);
+            region.rw_addr = region.rx_addr = NULL;
+            region.size = 0;
+            continue;
+        }
+
+        HUSK_LOG("legacy JIT %s: dual mapping rw=%p rx=%p size=%zu diff=%+lld",
+                 attempts[i].name, (void *)region.rw_addr, (void *)region.rx_addr,
+                 region.size, (long long)(region.rx_addr - region.rw_addr));
+        husk_ios_jit_log_footprint("after-legacy-jit-alloc");
+
+        if (!husk_jit_selftest(&region)) {
+            HUSK_LOG("legacy JIT %s: selftest FAILED; releasing", attempts[i].name);
+            husk_ios_jit_release(&region);
+            continue;
+        }
+
+        atomic_store(&g_jit_available, true);
+        HUSK_LOG("legacy JIT %s: PASS -- executable dual-map live under CS_DEBUGGED",
+                 attempts[i].name);
+        return region;
+    }
+
+    return region;
+}
+
+static HuskDualMapping husk_ios_jit_allocate_stikdebug(size_t bytes)
 {
     HuskDualMapping region = { NULL, NULL, 0 };
     uint64_t n = atomic_fetch_add(&g_alloc_counter, 1) + 1;
@@ -391,10 +568,9 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
     uint64_t probe = husk_brk_probe();
     g_expecting_jit_trap = false;
     if (probe == 0) {
-        HUSK_LOG("#%llu: StikDebug is NOT servicing traps -- probe returned 0, which "
-                 "is our own SIGTRAP handler stepping over an unanswered brk. "
-                 "Cannot allocate %zu bytes.",
-                 (unsigned long long)n, bytes);
+        HUSK_LOG("#%llu: StikDebug is NOT servicing traps -- probe returned 0 "
+                 "(our SIGTRAP handler stepped over an unanswered brk).",
+                 (unsigned long long)n);
         return region;
     }
 
@@ -404,24 +580,11 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
         HUSK_LOG("#%llu: StikDebug attach probe OK (0x%llx)",
                  (unsigned long long)n, (unsigned long long)probe);
     } else {
-        /* Serviced, but by something that answers differently. Proceed -- the
-         * allocation itself is the real test -- and record the value so an
-         * unfamiliar StikDebug build is identifiable from the log alone. */
         HUSK_LOG("#%llu: trap was serviced but the answer is unrecognised (0x%llx). "
                  "Continuing anyway; the allocation below is the real test.",
                  (unsigned long long)n, (unsigned long long)probe);
     }
 
-    /*
-     * Ask for a FRESH region (x0 == 0) so StikDebug allocates it with
-     * debugserver `_M<size>,rx` and then walks every 16 KiB page with
-     * `M<addr>,1:69`. Requesting a fresh region is the only branch that gets
-     * those pages prepared; handing in an address we allocated ourselves does not.
-     *
-     * StikDebug can be momentarily unresponsive (busy, or briefly suspended by
-     * iOS) rather than permanently gone, and the two are indistinguishable from
-     * here, so retry a few times before giving up.
-     */
     enum { kMaxAttempts = 3 };
     void *rx = NULL;
     for (int attempt = 1; attempt <= kMaxAttempts; attempt++) {
@@ -444,40 +607,15 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
     }
 
     if (rx == NULL) {
-        HUSK_LOG("#%llu: FAILED after %d attempts. StikDebug must be attached with "
-                 "the Universal JIT script BEFORE the guest is started.",
+        HUSK_LOG("#%llu: StikDebug BreakGetJITMapping FAILED after %d attempts.",
                  (unsigned long long)n, kMaxAttempts);
         return region;
     }
 
-    /* Writable alias of the same physical pages. Purely local -- no debugger
-     * involvement, and therefore still available after detach. */
-    vm_address_t rw = 0;
-    vm_prot_t cur_prot = VM_PROT_NONE, max_prot = VM_PROT_NONE;
-    kern_return_t kr = vm_remap(mach_task_self(), &rw, (vm_size_t)bytes,
-                                /*mask=*/0, VM_FLAGS_ANYWHERE,
-                                mach_task_self(), (vm_address_t)rx,
-                                /*copy=*/FALSE, &cur_prot, &max_prot,
-                                VM_INHERIT_NONE);
-    if (kr != KERN_SUCCESS) {
-        HUSK_LOG("#%llu: vm_remap failed for rx=%p size=%zu: %d (%s)",
-                 (unsigned long long)n, rx, bytes, (int)kr, mach_error_string(kr));
+    if (!husk_dual_map_from_rx(rx, bytes, &region)) {
         return region;
     }
 
-    kr = vm_protect(mach_task_self(), rw, (vm_size_t)bytes, /*set_maximum=*/FALSE,
-                    VM_PROT_READ | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) {
-        HUSK_LOG("#%llu: vm_protect(RW) failed for rw=%p size=%zu: %d (%s)",
-                 (unsigned long long)n, (void *)rw, bytes, (int)kr,
-                 mach_error_string(kr));
-        vm_deallocate(mach_task_self(), rw, (vm_size_t)bytes);
-        return region;
-    }
-
-    region.rw_addr = (uint8_t *)rw;
-    region.rx_addr = (uint8_t *)rx;
-    region.size    = bytes;
     atomic_store(&g_jit_available, true);
 
     HUSK_LOG("#%llu: dual mapping established: rw=%p rx=%p size=%zu diff=%+lld",
@@ -527,9 +665,9 @@ bool husk_ios_jit_is_available(void)
     return atomic_load(&g_jit_available);
 }
 
-/* ------------------------------------------------------------- MAP_JIT probe */
+/* ------------------------------------------------------------- MAP_JIT / legacy probe */
 /*
- * Ask the kernel what protection a MAP_JIT page actually received.
+ * Ask the kernel what protection a page actually received.
  */
 static bool husk_page_is_executable(void *p)
 {
@@ -542,69 +680,74 @@ static bool husk_page_is_executable(void *p)
     kern_return_t kr = vm_region_recurse_64(mach_task_self(), &addr, &size, &depth,
                                             (vm_region_recurse_info_t)&info, &count);
     if (kr != KERN_SUCCESS) {
-        HUSK_LOG("MAP_JIT probe: vm_region_recurse_64 failed: %s", mach_error_string(kr));
+        HUSK_LOG("exec probe: vm_region_recurse_64 failed: %s", mach_error_string(kr));
         return false;
     }
-    HUSK_LOG("MAP_JIT probe: kernel granted protection 0x%x (execute %s)",
+    HUSK_LOG("exec probe: kernel granted protection 0x%x (execute %s)",
              (unsigned)info.protection,
              (info.protection & VM_PROT_EXECUTE) ? "yes" : "NO");
     return (info.protection & VM_PROT_EXECUTE) != 0;
 }
 
 /*
- * Can this process obtain executable MAP_JIT memory?
+ * Soft probe: can this process obtain executable anonymous memory WITHOUT a
+ * trap servicer?
  *
- * There are two ways to get executable memory on iOS. The dual mapping above
- * needs a debugger that services brk traps; the other route is a plain MAP_JIT
- * mapping, which the kernel honours for a process with CS_DEBUGGED or
- * dynamic-codesigning (TrollStore) and which is what QEMU falls back to.
+ * MAP_JIT alone is the wrong question on A12+ iOS 15 TrollStore builds: we do
+ * not embed dynamic-codesigning (AMFI banned entitlement), so mmap(..., MAP_JIT)
+ * returns EINVAL even after CS_DEBUGGED is set. The real pre-TXM route is plain
+ * PROT_READ|PROT_EXEC (+ RW mirror), which the kernel honours once CS_DEBUGGED
+ * is set by TrollStore's ptrace attach/detach.
  *
- * This asks the kernel only: mmap MAP_JIT, then read VM_PROT_EXECUTE. It
- * deliberately does not branch into the page. An in-process execute self-test
- * was fatal on some pre-TXM devices during SwiftUI bring-up (SIGKILL rather
- * than a catchable fault), which presented as a launch flash-crash.
+ * Soft only: mmap + vm_region. No in-process call into the page (that can
+ * SIGKILL during bring-up when CS_DEBUGGED is still clear). Cache is keyed on
+ * the current CS_DEBUGGED bit so a probe taken before enable-jit does not stick
+ * forever after attach.
  */
 bool husk_ios_jit_mapjit_works(void)
 {
-    static atomic_int cached;   /* 0 unknown, 1 yes, -1 no */
-    int known = atomic_load(&cached);
-    if (known != 0) {
+    int debugged_now = husk_cs_debugged() ? 1 : 0;
+    int known = atomic_load(&g_mapjit_cached);
+    int known_dbg = atomic_load(&g_mapjit_cached_debugged);
+    if (known != 0 && known_dbg == debugged_now) {
         return known > 0;
     }
 
-    /*
-     * Soft probe only: mmap + ask the kernel for VM_PROT_EXECUTE.
-     *
-     * The previous path also wrote a tiny stub and called it under a signal
-     * guard. That self-test is useful on a desk, but UI bring-up on iOS 15
-     * calls this from SwiftUI body / onAppear. On some pre-TXM devices an
-     * unblessed execute is not a catchable SIGSEGV -- the process is killed
-     * outright, which looks exactly like a launch flash-crash under
-     * TrollStore. Trust the kernel's protection bits instead; QEMU's own
-     * first translation is the real execute test, and it already has a
-     * failure path.
-     */
     const size_t len = 16 * 1024;   /* one iOS page */
-    void *p = mmap(NULL, len, PROT_READ | PROT_WRITE | PROT_EXEC,
-                   MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
-    if (p == MAP_FAILED) {
-        HUSK_LOG("MAP_JIT probe: mmap refused (%s) -- no executable memory this "
-                 "way; a trap servicer is the only route on this device",
-                 strerror(errno));
-        atomic_store(&cached, -1);
-        return false;
+    bool ok = false;
+
+    /* Prefer the plain-RX path that legacy allocate uses. */
+    void *p = mmap(NULL, len, PROT_READ | PROT_EXEC,
+                   MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p != MAP_FAILED) {
+        ok = husk_page_is_executable(p);
+        HUSK_LOG("legacy soft probe (plain-RX): %s (CS_DEBUGGED %s)",
+                 ok ? "PASS" : "FAIL",
+                 debugged_now ? "set" : "clear");
+        munmap(p, len);
+    } else {
+        HUSK_LOG("legacy soft probe (plain-RX): mmap refused (%s)", strerror(errno));
     }
 
-    bool ok = husk_page_is_executable(p);
     if (!ok) {
-        HUSK_LOG("MAP_JIT probe: the mapping came back without execute permission "
-                 "-- a trap servicer is the only route on this device");
-    } else {
-        HUSK_LOG("MAP_JIT probe: PASS -- kernel granted execute on MAP_JIT "
-                 "(no in-process execute self-test; that could kill bring-up)");
+        p = mmap(NULL, len, PROT_READ | PROT_WRITE | PROT_EXEC,
+                 MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+        if (p == MAP_FAILED) {
+            HUSK_LOG("MAP_JIT soft probe: mmap refused (%s)", strerror(errno));
+        } else {
+            ok = husk_page_is_executable(p);
+            HUSK_LOG("MAP_JIT soft probe: %s", ok ? "PASS" : "FAIL");
+            munmap(p, len);
+        }
     }
-    munmap(p, len);
-    atomic_store(&cached, ok ? 1 : -1);
+
+    if (!ok && !debugged_now) {
+        HUSK_LOG("no executable anonymous mapping yet; CS_DEBUGGED is clear. "
+                 "On pre-TXM, TrollStore enable-jit must set it first.");
+    }
+
+    atomic_store(&g_mapjit_cached, ok ? 1 : -1);
+    atomic_store(&g_mapjit_cached_debugged, debugged_now);
     return ok;
 }
 
@@ -626,6 +769,7 @@ void husk_ios_jit_release(HuskDualMapping *m) { (void)m; }
 void husk_ios_jit_detach(void) {}
 bool husk_ios_jit_is_available(void) { return false; }
 bool husk_ios_jit_mapjit_works(void) { return false; }
+void husk_ios_jit_invalidate_probe_cache(void) {}
 void husk_ios_jit_log_footprint(const char *tag) { (void)tag; }
 size_t husk_ios_available_memory(void) { return 0; }
 

@@ -9,10 +9,14 @@
  * ---------------------------------------------------------------------------
  * Why this file exists
  * ---------------------------------------------------------------------------
- * On iOS 27 every supported device enforces TXM, so an app cannot map RWX or
- * mprotect anything to PROT_EXEC. Executable memory can only be granted by an
- * attached debugger. StikDebug provides that service over a breakpoint-based
- * RPC (BreakpointJIT.framework):
+ * On TXM devices (iOS 26+ on A14+/A15+ class silicon) an app cannot map RWX or
+ * mprotect anything to PROT_EXEC; executable memory must come from a trap
+ * servicer (StikDebug). On pre-TXM (iOS 15 TrollStore, CS_DEBUGGED set by
+ * enable-jit) the classic UTM dual-map works: plain RX + RW vm_remap, no
+ * dynamic-codesigning / MAP_JIT required.
+ *
+ * StikDebug provides the TXM path over a breakpoint-based RPC
+ * (BreakpointJIT.framework):
  *
  *     BreakGetJITMapping(NULL, size)   ->  brk #0xf00d, x16 = 1
  *
@@ -98,22 +102,18 @@ HUSK_EXPORT void husk_ios_jit_detach(void);
 HUSK_EXPORT bool husk_ios_jit_is_available(void);
 
 /*
- * Whether this process can execute memory it wrote itself, through a plain
- * MAP_JIT mapping and TCG's own W^X toggle -- the route every other iOS
- * emulator uses, and the one QEMU falls back to when the dual mapping is
- * unavailable.
- *
- * Measured, not inferred: it maps a page, writes two instructions into it,
- * calls them and checks the answer, with a guard around the call so a page that
- * turns out not to be executable fails this test instead of killing the app.
- * The result is cached after the first call.
- *
- * This exists because the question "does this device need a trap servicer?" was
- * previously answered from the device model and the iOS version, and that guess
- * is wrong on at least one real combination -- iOS 26, where StikDebug attaches
- * but services no traps because MAP_JIT works and it does not need to.
+ * Soft probe: can this process obtain executable anonymous memory WITHOUT a
+ * StikDebug trap servicer? Tries plain PROT_READ|PROT_EXEC first (the pre-TXM
+ * CS_DEBUGGED path used by UTM), then MAP_JIT. Soft only -- mmap + vm_region,
+ * never an in-process call into the page (that can AMFI-SIGKILL during bring-up
+ * when CS_DEBUGGED is still clear). Cache is keyed on the current CS_DEBUGGED
+ * bit; call husk_ios_jit_invalidate_probe_cache() after enable-jit attaches.
  */
 HUSK_EXPORT bool husk_ios_jit_mapjit_works(void);
+
+/* Drop the soft-probe cache so the next mapjit_works() re-checks under the
+ * current CS_DEBUGGED state (call after TrollStore/StikDebug attach). */
+HUSK_EXPORT void husk_ios_jit_invalidate_probe_cache(void);
 
 /*
  * Log the process's phys_footprint -- the number jetsam actually kills on.

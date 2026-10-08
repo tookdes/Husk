@@ -61,3 +61,16 @@ mkdir -p "$(dirname "$OUT")"
 
 step "iOS 15 ABI guard"
 ./scripts/check_ios15_abi.sh "$OUT"
+
+# Also keep a versioned sibling next to OUT so a downloaded artifact that still
+# uses the stable Actions path can be copied/renamed locally without guessing.
+# (Pushing workflow renames needs the GitHub `workflow` scope.)
+VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' src/app/Husk/Info.plist 2>/dev/null || echo 0)
+BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' src/app/Husk/Info.plist 2>/dev/null || echo 0)
+SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+VERSIONED="$(dirname "$OUT")/Husk-${VER}-${BUILD}-${SHA}.ipa"
+if [ "$OUT" != "$VERSIONED" ] && [ -f "$OUT" ]; then
+    cp -f "$OUT" "$VERSIONED"
+    echo "==> also wrote $VERSIONED"
+fi
+

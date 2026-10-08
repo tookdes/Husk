@@ -87,6 +87,7 @@ static void (*p_husk_ios_jit_install_trap_handler)(void);
 static bool (*p_husk_ios_jit_prewarm)(size_t);
 static bool (*p_husk_ios_jit_is_available)(void);
 static bool (*p_husk_ios_jit_mapjit_works)(void);
+static void (*p_husk_ios_jit_invalidate_probe_cache)(void);
 static void (*p_husk_ios_jit_detach)(void);
 static void (*p_husk_ios_jit_log_footprint)(const char *);
 static size_t (*p_husk_ios_available_memory)(void);
@@ -153,6 +154,7 @@ static void load_qemu_once(void)
     RESOLVE(husk_ios_jit_prewarm);
     RESOLVE(husk_ios_jit_is_available);
     RESOLVE(husk_ios_jit_mapjit_works);
+    RESOLVE(husk_ios_jit_invalidate_probe_cache);
     RESOLVE(husk_ios_jit_detach);
     RESOLVE(husk_ios_jit_log_footprint);
     RESOLVE(husk_ios_available_memory);
@@ -259,6 +261,11 @@ bool husk_ios_jit_mapjit_works(void)
 {
     if (!husk_ensure_qemu_loaded() || !p_husk_ios_jit_mapjit_works) return false;
     return p_husk_ios_jit_mapjit_works();
+}
+void husk_ios_jit_invalidate_probe_cache(void)
+{
+    if (!husk_ensure_qemu_loaded() || !p_husk_ios_jit_invalidate_probe_cache) return;
+    p_husk_ios_jit_invalidate_probe_cache();
 }
 void husk_ios_jit_detach(void)
 {

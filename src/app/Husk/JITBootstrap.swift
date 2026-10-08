@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import Foundation
 import UIKit
+import Darwin
 import os
 
 /// `csops(2)`. Reading CS_DEBUGGED is how we ask "is a debugger attached right
@@ -74,31 +75,51 @@ enum JITBootstrap {
             HuskLog.log("jit", "no debugger attached yet; not prewarming")
             return false
         }
-        HuskLog.log("jit", "claiming \(jitBytes / (1024 * 1024)) MiB of JIT memory now, "
-                         + "before the guest download -- StikDebug does not stay attached")
+        // CS_DEBUGGED may have just flipped; drop any soft-probe result taken
+        // before enable-jit (that one always saw MAP_JIT EINVAL / no plain-RX).
+        invalidateExecutableProbeCache()
+        HuskLog.log("jit", "claiming \(jitBytes / (1024 * 1024)) MiB of JIT memory now "
+                         + "(StikDebug trap path, then legacy CS_DEBUGGED dual-map)")
         let ok = husk_ios_jit_prewarm(jitBytes)
         if ok {
             prewarmed = true
             lastFailure = nil
-            detachIfDone()
+            // Only detach a trap servicer. Legacy dual-map does not need StikDebug
+            // to stay around, and husk_ios_jit_detach() is a no-op-ish brk; still
+            // safe, but skip the misleading "detaching StikDebug" log on TrollStore.
+            if deviceEnforcesTXM {
+                detachIfDone()
+            }
+            HuskLog.log("jit", "JIT region secured; it will be handed to QEMU later")
+            return true
         }
-        else if mapJITWorks {
-            // Not a failure worth reporting: this is the ordinary shape of an
-            // iOS that does not need a trap servicer. QEMU maps its own buffer
-            // with MAP_JIT a moment later and runs exactly as well.
+        if mapJITWorks {
+            // Soft probe says executable anonymous pages work; QEMU's allocate
+            // retries the legacy path. Not a hard failure.
             lastFailure = nil
-            HuskLog.log("jit", "no trap servicer, but MAP_JIT executes here -- "
-                             + "QEMU will map its own buffer")
-        } else {
-            lastFailure = "The debugger is attached but is not answering trap "
-                        + "requests, and this device will not execute a MAP_JIT "
-                        + "mapping either, so no executable memory could be "
-                        + "claimed. This is what happens when Husk runs inside "
-                        + "another container app rather than sideloaded on its own."
+            HuskLog.log("jit", "prewarm allocator returned nil, but soft probe says "
+                             + "executable memory works -- QEMU will allocate on start")
+            return false
         }
-        HuskLog.log("jit", ok ? "JIT region secured; it will be handed to QEMU later"
-                              : "JIT prewarm FAILED -- StikDebug is not servicing traps")
-        return ok
+        if deviceEnforcesTXM {
+            lastFailure = "StikDebug is attached (CS_DEBUGGED) but is not answering "
+                        + "trap requests, and TXM forbids a local dual-map. Attach "
+                        + "StikDebug with the Universal JIT script, not only a "
+                        + "debugger that sets CS_DEBUGGED."
+        } else {
+            lastFailure = "CS_DEBUGGED is set but the legacy RX+RW dual-map failed. "
+                        + "On iOS 15 this should work after TrollStore enable-jit; "
+                        + "check husk-native.log for mmap/vm_remap/mprotect errors."
+        }
+        HuskLog.log("jit", "JIT prewarm FAILED -- \(deviceEnforcesTXM ? "no trap servicer" : "legacy dual-map failed")")
+        return false
+    }
+
+    /// Drop cached soft-probe results so the next mapJITWorks / allocate sees
+    /// the current CS_DEBUGGED state.
+    static func invalidateExecutableProbeCache() {
+        mapJITResult = nil
+        husk_ios_jit_invalidate_probe_cache()
     }
 
     /// Whether to leave StikDebug attached after the region is held.
@@ -149,14 +170,15 @@ enum JITBootstrap {
     /// still prefer canExecuteJITCode / the cached mapJITResult rather than
     /// calling this during body evaluation.
     static var mapJITWorks: Bool {
-        if let known = mapJITResult { return known }
-        let result: Bool
         if deviceEnforcesTXM {
-            HuskLog.log("jit", "TXM device: MAP_JIT cannot execute here, not probing")
-            result = false
-        } else {
-            result = husk_ios_jit_mapjit_works()
+            if mapJITResult == nil {
+                HuskLog.log("jit", "TXM device: local executable mappings cannot work; not probing")
+                mapJITResult = false
+            }
+            return false
         }
+        // C cache is keyed on CS_DEBUGGED; still keep a Swift-side answer for UI.
+        let result = husk_ios_jit_mapjit_works()
         mapJITResult = result
         return result
     }
@@ -178,14 +200,22 @@ enum JITBootstrap {
     /// every time, and every trap is a chance to hit a moment when StikDebug is
     /// not listening. The brk probe still runs once, inside the allocator, where
     /// its answer is immediately acted on.
+    nonisolated(unsafe) private static var lastLoggedDebugFlags: UInt32?
     static var isDebuggerAttached: Bool {
         guard let flags = csStatus() else {
             HuskLog.log("jit", "csops failed (errno \(errno)); assuming no debugger")
             return false
         }
         let attached = (flags & CS_DEBUGGED) != 0
-        HuskLog.log("jit", String(format: "csops status = 0x%08x, CS_DEBUGGED = %@",
-                                  flags, attached ? "set" : "clear"))
+        if lastLoggedDebugFlags != flags {
+            lastLoggedDebugFlags = flags
+            HuskLog.log("jit", String(format: "csops status = 0x%08x, CS_DEBUGGED = %@",
+                                      flags, attached ? "set" : "clear"))
+            if attached {
+                // A probe taken before enable-jit must not stick.
+                invalidateExecutableProbeCache()
+            }
+        }
         return attached
     }
 
@@ -212,15 +242,43 @@ enum JITBootstrap {
         URL(string: "apple-magnifier://").map(UIApplication.shared.canOpenURL) ?? false
     }
 
-    /// Whether this copy of Husk was installed by TrollStore (or TrollStore Lite): it leaves a marker file next to the app in
-    /// its bundle container (TrollStore's `TS_MARKER`). Only then is it a TrollStore app, which keeps the entitlements it was
-    /// built with -- including the memory ones.
+    /// Whether this copy of Husk was installed by TrollStore (or TrollStore Lite).
+    /// TrollStore leaves `_TrollStore` / `_TrollStoreLite` next to the `.app` in
+    /// the MCM bundle container. Try several path resolutions -- symlink vs
+    /// /private/var -- and log what was checked when nothing matches.
     static var isInstalledWithTrollStore: Bool {
-        let container = Bundle.main.bundleURL.deletingLastPathComponent()
-        return ["_TrollStore", "_TrollStoreLite"].contains {
-            FileManager.default.fileExists(atPath: container.appendingPathComponent($0).path)
+        if let cached = trollStoreInstallCached { return cached }
+        let fm = FileManager.default
+        var containers: [URL] = [
+            Bundle.main.bundleURL.deletingLastPathComponent(),
+            Bundle.main.bundleURL.resolvingSymlinksInPath().deletingLastPathComponent(),
+        ]
+        if let exe = Bundle.main.executableURL {
+            containers.append(exe.deletingLastPathComponent().deletingLastPathComponent())
+            containers.append(exe.resolvingSymlinksInPath()
+                .deletingLastPathComponent().deletingLastPathComponent())
         }
+        // Unique by path
+        var seen = Set<String>()
+        var checked: [String] = []
+        for container in containers {
+            let path = container.path
+            if !seen.insert(path).inserted { continue }
+            for marker in ["_TrollStore", "_TrollStoreLite"] {
+                let mark = container.appendingPathComponent(marker).path
+                checked.append(mark)
+                if fm.fileExists(atPath: mark) || access(mark, F_OK) == 0 {
+                    HuskLog.log("jit", "TrollStore marker found: \(mark)")
+                    trollStoreInstallCached = true
+                    return true
+                }
+            }
+        }
+        HuskLog.log("jit", "TrollStore marker not found; checked: \(checked.joined(separator: ", "))")
+        trollStoreInstallCached = false
+        return false
     }
+    nonisolated(unsafe) private static var trollStoreInstallCached: Bool?
 
     /// A rootless jailbreak (Dopamine and its kin) puts its files in /var/jb and lets apps see it.
     static var isJailbroken: Bool { FileManager.default.fileExists(atPath: "/var/jb") }
@@ -239,21 +297,21 @@ enum JITBootstrap {
         return true
     }
 
-    /// A debugger is only one way to obtain executable memory. On pre-TXM
-    /// systems (including the iOS 15 TrollStore target) get-task-allow +
-    /// TrollStore `apple-magnifier://enable-jit` (or a jailbreak) can make
-    /// MAP_JIT executable. `dynamic-codesigning` is intentionally NOT embedded:
-    /// iOS 15 on A12+ bans it and AMFI SIGKILLs at launch (TrollStore README).
+    /// True once this process can actually run generated code.
+    ///
+    /// On pre-TXM, that means CS_DEBUGGED (TrollStore enable-jit / debugger /
+    /// jailbreak "Allow JIT in Apps") so the legacy RX+RW dual-map works.
+    /// Merely being installed via TrollStore is NOT enough: we do not embed
+    /// `dynamic-codesigning` (banned on A12+ iOS 15), so MAP_JIT is refused
+    /// until CS_DEBUGGED is set. On TXM, CS_DEBUGGED alone is also not enough
+    /// -- a trap servicer must hand out RX pages -- but that is checked at
+    /// prewarm time; the UI still treats "debugger attached" as the gate to try.
     static var canExecuteJITCode: Bool {
-        if isDebuggerAttached { return true }
+        if isDebuggerAttached || debuggedAtLaunch { return true }
         guard canGrantOwnJIT else { return false }
-        // TrollStore install + get-task-allow, or a jailbreak that marks the
-        // process debugged at launch. Enough on pre-TXM without the MAP_JIT
-        // soft probe during SwiftUI bring-up.
-        if isInstalledWithTrollStore || isJailbroken || debuggedAtLaunch {
-            return true
-        }
-        return mapJITWorks
+        // Soft probe only when it cannot SIGKILL bring-up: prefer not to call
+        // from SwiftUI body. Views should use the cached mapJITResult.
+        return mapJITResult == true
     }
 
     /// husk-jit.js as standard base64, which Built-in StikJIT's custom script takes.
@@ -266,20 +324,77 @@ enum JITBootstrap {
     /// This backgrounds Husk — iOS switches to StikDebug, which attaches over the
     /// debugserver protocol, runs the script, and relaunches us. Everything after
     /// this point happens in a *new* foreground pass of the app.
+    /// Background task held across the TrollStore hand-off so iOS is less
+    /// likely to suspend/kill us before RootHelper's ptrace attach runs.
+    /// TrollStore status 3 is ESRCH ("process not found") -- exactly that race.
+    nonisolated(unsafe) private static var trollStoreBGTask: UIBackgroundTaskIdentifier = .invalid
+    /// Set while we are waiting for an enable-jit hand-off we initiated.
+    nonisolated(unsafe) private static var trollStoreAttachPending = false
+
     @MainActor
     static func requestTrollStoreAttach() -> Bool {
         HuskLog.log("jit", "requestTrollStoreAttach() -- handing off to TrollStore")
         guard let bundleID = Bundle.main.bundleIdentifier else { return false }
-        
+
         let url = "apple-magnifier://enable-jit?bundle-id=\(bundleID)"
         guard let launchURL = URL(string: url), UIApplication.shared.canOpenURL(launchURL) else {
-            HuskLog.log("jit", "FAIL: cannot open apple-magnifier:// -- TrollStore is not installed")
+            HuskLog.log("jit", "FAIL: cannot open apple-magnifier:// -- TrollStore is not installed "
+                             + "or its URL Scheme setting is off")
             return false
         }
-        
-        HuskLog.log("jit", "opening apple-magnifier:// for bundle \(bundleID)")
+
+        if trollStoreBGTask == .invalid {
+            trollStoreBGTask = UIApplication.shared.beginBackgroundTask(withName: "Husk TrollStore JIT") {
+                if trollStoreBGTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(trollStoreBGTask)
+                    trollStoreBGTask = .invalid
+                }
+            }
+        }
+
+        trollStoreAttachPending = true
+        trollStoreAttachRetriesLeft = 2
+        HuskLog.log("jit", "opening apple-magnifier://enable-jit for bundle \(bundleID) "
+                         + "(TrollStore status 3 = ESRCH: process not found -- keep Husk "
+                         + "alive; we hold a background task and will retry on return)")
         UIApplication.shared.open(launchURL)
         return true
+    }
+
+    nonisolated(unsafe) private static var trollStoreAttachRetriesLeft = 0
+
+    /// Call when returning to the foreground after an enable-jit hand-off we
+    /// started. No-op unless requestTrollStoreAttach() set the pending flag.
+    @MainActor
+    static func retryTrollStoreAttachIfNeeded() {
+        guard trollStoreAttachPending else { return }
+        if debuggedFlag {
+            HuskLog.log("jit", "TrollStore attach confirmed (CS_DEBUGGED set)")
+            trollStoreAttachPending = false
+            trollStoreAttachRetriesLeft = 0
+            invalidateExecutableProbeCache()
+            if trollStoreBGTask != .invalid {
+                UIApplication.shared.endBackgroundTask(trollStoreBGTask)
+                trollStoreBGTask = .invalid
+            }
+            return
+        }
+        guard trollStoreAttachRetriesLeft > 0 else {
+            HuskLog.log("jit", "TrollStore attach still missing after retries; giving up")
+            trollStoreAttachPending = false
+            if trollStoreBGTask != .invalid {
+                UIApplication.shared.endBackgroundTask(trollStoreBGTask)
+                trollStoreBGTask = .invalid
+            }
+            return
+        }
+        trollStoreAttachRetriesLeft -= 1
+        HuskLog.log("jit", "CS_DEBUGGED still clear after returning from TrollStore; "
+                         + "retrying enable-jit (\(trollStoreAttachRetriesLeft) left)")
+        // requestTrollStoreAttach resets retries; preserve remaining count.
+        let left = trollStoreAttachRetriesLeft
+        _ = requestTrollStoreAttach()
+        trollStoreAttachRetriesLeft = left
     }
 
     @MainActor

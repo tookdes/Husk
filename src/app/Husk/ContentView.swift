@@ -120,7 +120,6 @@ struct ContentView: View {
             OnboardingView {
                 showOnboarding = false
                 if Onboarding.autoStart, JITBootstrap.canExecuteJITCode {
-                    booting = true
                     start()
                 }
             }
@@ -147,7 +146,12 @@ struct ContentView: View {
         .onChange(of: scenePhase) { phase in
             // StikDebug relaunches Husk after attaching, so returning to the
             // foreground is the moment worth re-checking, not first launch.
-            if phase == .active { evaluate() }
+            // TrollStore enable-jit backgrounds us; on return, retry once if
+            // CS_DEBUGGED is still clear (RootHelper status 3 = ESRCH).
+            if phase == .active {
+                JITBootstrap.retryTrollStoreAttachIfNeeded()
+                evaluate()
+            }
         }
     }
 
@@ -167,23 +171,15 @@ struct ContentView: View {
         }
 
         // Claim the JIT region now, on the first foreground pass after the debugger
-        // attaches, while it is still running. Waiting for the Start button means
-        // iOS has often suspended the debugger, causing unserviced brk freezes.
-        // After the first call this is a no-op, and on success it also detaches the debugger.
-        JITBootstrap.prewarm()
+        // attaches. Legacy dual-map (pre-TXM) and StikDebug (TXM) both live here.
+        let warmed = JITBootstrap.prewarm()
+        if !warmed, JITBootstrap.lastFailure != nil {
+            HuskLog.log("ui", "JIT prewarm failed: \(JITBootstrap.lastFailure!)")
+        }
 
-        // Start on launch, when that is what was asked for.
-        //
-        // This deliberately did nothing for a long time, and the reason was
-        // sound: booting takes minutes and its cost depends on choices made
-        // before it starts, so it should not be a side effect of opening the
-        // app. But the setup flow now asks the question outright, and someone
-        // who answered yes has made the decision -- continuing to ignore it
-        // just means every launch begins by pressing Start.
         guard Onboarding.autoStart, !started, guest.state == .ready,
               !showOnboarding else { return }
         HuskLog.log("ui", "starting Android on launch")
-        booting = true
         start()
     }
 
@@ -217,37 +213,27 @@ struct ContentView: View {
 
     private func start() {
         guard !started else { return }
-        guard JITBootstrap.canExecuteJITCode else { return }
-        HuskLog.log("ui", "JIT executable memory available; starting QEMU")
-        // Take the JIT region at the last moment before QEMU, as well as before
-        // the download. Whichever comes first wins; the second call is a no-op.
-        //
-        // And refuse to continue without it. qemu_init() allocates its
-        // translation buffer inside itself and has nowhere to get executable
-        // memory from if this failed, so starting anyway is not optimism, it is
-        // a guaranteed SIGSEGV a few milliseconds later -- with the log showing
-        // gigabytes free, which sends everyone looking at memory.
-        // Refuse only when there is genuinely nothing left to try.
-        //
-        // Two routes, and the second one is not a consolation prize: with
-        // CS_DEBUGGED set the kernel honours a plain MAP_JIT mapping, which is
-        // what QEMU falls back to on its own and what every other iOS emulator
-        // runs on. Stopping here is only right when neither route exists.
-        //
-        // Which route is available is now measured. It used to be predicted
-        // from the device model and the iOS version, and the prediction was
-        // wrong for iOS 26: StikDebug attaches there without servicing traps,
-        // because on that OS it does not need to, and Husk read that as "no
-        // executable memory" and refused to start a guest that would have run.
+        guard JITBootstrap.canExecuteJITCode else {
+            booting = false
+            return
+        }
+        HuskLog.log("ui", "JIT path ready (CS_DEBUGGED / soft probe); starting QEMU")
+        // Claim dual-mapped JIT memory (StikDebug on TXM, legacy RX+RW on
+        // pre-TXM). Refuse only when neither backend works -- starting anyway
+        // is a guaranteed fault inside qemu_init with a misleading "GB free".
         if !JITBootstrap.prewarm(), !JITBootstrap.isLive {
+            // Soft probe may still say yes (allocator retries on qemu_init).
             guard JITBootstrap.mapJITWorks else {
-                HuskLog.log("jit", "refusing to start QEMU: no trap servicer is "
-                                 + "answering and MAP_JIT does not execute here")
+                let why = JITBootstrap.lastFailure
+                    ?? "no trap servicer and no legacy executable mapping"
+                HuskLog.log("jit", "refusing to start QEMU: \(why)")
+                booting = false
                 return
             }
-            HuskLog.log("jit", "no dual mapping, but MAP_JIT executes -- letting "
-                             + "QEMU map its own buffer")
+            HuskLog.log("jit", "prewarm empty but soft probe OK -- QEMU will "
+                             + "allocate the dual-map during init")
         }
+        booting = true
         started = true
         QemuRunner.shared.start()
         // Start probing the bridge now, not when the library happens to be
@@ -523,7 +509,7 @@ struct SetupView: View {
                     Text("Something went wrong").font(.headline).foregroundStyle(.red)
                     Text(message).font(.caption).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center).padding(.horizontal, 34)
-                    Button("Try again") { JITBootstrap.prewarm(); guest.download() }.buttonStyle(.borderedProminent)
+                    Button("Try again") { guest.download() }.buttonStyle(.borderedProminent)
                 }
             case .missing:
                 VStack(spacing: 12) {
@@ -531,10 +517,11 @@ struct SetupView: View {
                         .font(.callout).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center).padding(.horizontal, 36)
                     Button("Download Android runtime") {
-                        // Claim the JIT region before the download, not after:
-                        // it takes about a minute, and StikDebug will have let
-                        // go by the end of it.
-                        JITBootstrap.prewarm()
+                        // Download is independent of JIT. Prewarm used to run
+                        // here for the StikDebug "claim before download" rule,
+                        // but on pre-TXM TrollStore the dual-map only works
+                        // after enable-jit, and gating the download on that
+                        // left the progress UI stuck at "starting".
                         guest.download()
                     }
                         .buttonStyle(.borderedProminent)
