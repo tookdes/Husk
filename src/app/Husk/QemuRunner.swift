@@ -191,7 +191,9 @@ final class QemuRunner: ObservableObject {
 
     /// Host-side "make TCG hurt less" profile for the iOS 15 software path.
     ///
-    /// Default ON below iOS 16.4: ANGLE/Metal GL is unavailable there, so every
+    /// Default ON below iOS 16.4 (it was written when ANGLE could not load on
+    /// iPadOS 15; with the GPU renderer it still helps, because Android's
+    /// framework itself is emulated code). On the CPU renderer every
     /// pixel is software-rasterised inside the emulated CPU, and the 0.8.6
     /// logs show the frame counter collapsing to 0 fps once System UI is
     /// busy. This does not change the QEMU machine shape (so the shipped
@@ -277,6 +279,9 @@ final class QemuRunner: ObservableObject {
     }
 
     nonisolated(unsafe) static var qemuReady = false
+
+    /// zygote deaths seen during a GPU cold boot (GPUGuard's watchdog check).
+    nonisolated(unsafe) static var glColdBootFrameworkRestarts = 0
 
     // MARK: iOS suspension
 
@@ -445,8 +450,22 @@ final class QemuRunner: ObservableObject {
     /// A restored machine must be given exactly the memory it was saved with,
     /// and the budget is computed from a figure that can drift between runs.
     nonisolated var snapshotSizePath: String {
+        QemuRunner.snapshotStampPath("husk-snapshot", "mib", gl: QemuRunner.glProven)
+    }
+
+    /// Stamp files for the software machine and the GPU machine are kept
+    /// apart, like the snapshots themselves ("husk-ready" / "husk-ready-gl",
+    /// see husk-snapshot.c): the shipped snapshot is a software machine, and a
+    /// GPU save must not retire it -- otherwise falling back to the CPU
+    /// renderer would mean a cold boot, which on iPadOS 15 never finishes.
+    nonisolated static func snapshotStampPath(_ base: String, _ ext: String, gl: Bool) -> String {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("husk-snapshot.mib").path
+            .appendingPathComponent(gl ? "\(base)-gl.\(ext)" : "\(base).\(ext)").path
+    }
+
+    /// The internal qcow2 snapshot this session saves to and restores from.
+    nonisolated static var snapshotName: String {
+        glProven ? "husk-ready-gl" : "husk-ready"
     }
 
     /// Whether to give the guest a real GPU.
@@ -454,12 +473,16 @@ final class QemuRunner: ObservableObject {
     /// Opt-in, because turning it on invalidates any snapshot saved without one
     /// and therefore costs a single cold boot before it pays for itself.
     nonisolated static var gpuModeEnabled: Bool {
-        // The current ANGLE build has a 16.4 minimum OS. Keep the first iOS 15
-        // bring-up on the software framebuffer so dyld never needs to load it.
-        if #available(iOS 16.4, *) {
-            return UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
-        }
-        return false
+        // 0.9.0: ANGLE is built for an iOS 15.0 floor (UTM's WebKit fork, as
+        // UTM ships it), so iPadOS 15 gets the GPU renderer too. The 16.4 gate
+        // that used to sit here existed only because the previous ANGLE build
+        // had LC_BUILD_VERSION minos 16.4 and dyld would refuse it.
+        //
+        // Absent means GPU: bool(forKey:) answers false for a key nobody has
+        // set, which quietly made the slow renderer the default. GPUGuard can
+        // veto it for a session after a GPU start went wrong.
+        let chosen = UserDefaults.standard.object(forKey: "husk.gpuMode") as? Bool ?? true
+        return chosen && GPUGuard.allowedThisSession
     }
 
     /// Which display device the saved machine was built around.
@@ -468,8 +491,7 @@ final class QemuRunner: ObservableObject {
     /// as it is only valid against its RAM size, so this is recorded next to it
     /// and checked before any restore is attempted.
     nonisolated var snapshotDisplayPath: String {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("husk-snapshot.display").path
+        QemuRunner.snapshotStampPath("husk-snapshot", "display", gl: QemuRunner.glProven)
     }
     nonisolated var snapshotDisplay: String? {
         (try? String(contentsOfFile: snapshotDisplayPath, encoding: .utf8))?
@@ -493,10 +515,16 @@ final class QemuRunner: ObservableObject {
     /// software one should not silently throw away a GPU one.
     @discardableResult
     nonisolated func forgetSnapshot(mode: String) -> Bool {
-        guard hasSnapshot else { return false }
-        let have = snapshotDisplay ?? "sw"
-        guard have == mode else { return false }
-        for path in [snapshotSizePath, snapshotDisplayPath, memoryStrategyPath] {
+        // Each mode has its own stamp files now, so forgetting one never
+        // touches the other.
+        let gl = (mode == "gl")
+        let size = QemuRunner.snapshotStampPath("husk-snapshot", "mib", gl: gl)
+        let disp = QemuRunner.snapshotStampPath("husk-snapshot", "display", gl: gl)
+        let strat = QemuRunner.snapshotStampPath("husk-memory-strategy", "txt", gl: gl)
+        let legacyStrat = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("husk-memory-strategy").path
+        guard FileManager.default.fileExists(atPath: size) else { return false }
+        for path in [size, disp, strat] + (gl ? [] : [legacyStrat]) {
             try? FileManager.default.removeItem(atPath: path)
         }
         HuskLog.log("snap", "forgot the \(mode) machine; the next launch boots from cold")
@@ -840,8 +868,12 @@ final class QemuRunner: ObservableObject {
     /// changes that shape. Restoring a file-backed machine into an anonymous
     /// one (or the reverse) is not something to find out about at load time.
     nonisolated var memoryStrategyPath: String {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("husk-memory-strategy").path
+        // The software machine keeps the historical name, so a 0.8.x install's
+        // stamp is still recognised.
+        QemuRunner.glProven
+            ? QemuRunner.snapshotStampPath("husk-memory-strategy", "txt", gl: true)
+            : FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("husk-memory-strategy").path
     }
 
     /// Bumped whenever the memory layout changes, to retire old snapshots.
@@ -1495,12 +1527,18 @@ final class QemuRunner: ObservableObject {
             UserDefaults.standard.set(true, forKey: "husk.glProven")
             HuskLog.log("gl", "GL works; this and future runs use the GPU")
         } else {
-            HuskLog.log("gl", "GL not usable on this device; software display it is")
+            HuskLog.log("gl", "GL not usable on this device; software display it is "
+                            + "(look for [epoxy]/EGL/ANGLE lines just above for the reason)")
         }
     }
 
     private func run() {
+        GPUGuard.beginSession()
+        if QemuRunner.gpuModeEnabled { GPUGuard.mark("probe") }
         probeGL()
+        if !QemuRunner.glProven {
+            GPUGuard.clear("this session uses the CPU renderer")
+        }
         QemuRunner.decideSoundForThisRun()
         let args = (profile == .phase0Alpine) ? phase0Arguments() : phase1Arguments()
         HuskLog.log("qemu", "profile: \(profile.rawValue)")
@@ -1565,12 +1603,17 @@ final class QemuRunner: ObservableObject {
         // only safe alongside the stop-the-framework-before-saving discipline
         // in saveState().
         if QemuRunner.glProven { setenv("HUSK_VIRGL_SNAPSHOT", "1", 1) }
+        // Which internal snapshot to save to / restore from (husk-snapshot.c).
+        setenv("HUSK_SNAPSHOT_NAME", QemuRunner.snapshotName, 1)
+        HuskLog.log("snap", "snapshot slot for this machine: \(QemuRunner.snapshotName)")
+        if QemuRunner.glProven { GPUGuard.mark("init") }
 
         HuskLog.log("qemu", "calling qemu_init() -- JIT allocation happens inside this")
         argv.withUnsafeMutableBufferPointer { buf in
             qemu_init(Int32(args.count), buf.baseAddress)
         }
         HuskLog.log("qemu", "qemu_init() returned")
+        if QemuRunner.glProven { GPUGuard.mark("bind") }
         // Nothing in QEMU may be called before this point -- its locks do not
         // exist yet, and bql_lock() on an uninitialised mutex aborts the
         // process. husk_display_gl_early() says so in its own comment and I
@@ -1676,6 +1719,14 @@ final class QemuRunner: ObservableObject {
             glUp = husk_display_gl_bind()
             HuskLog.log("qemu", glUp ? "GL display is up -- the GPU is drawing now"
                                      : "GL bind failed after a successful probe")
+            if glUp {
+                GPUGuard.mark("running")
+            } else {
+                // This machine has a virtio-gpu-gl device the software display
+                // cannot show; the next launch should not try again.
+                GPUGuard.turnOff("GL bind failed after a successful probe")
+                GPUGuard.clear("GL bind failed; fallback armed instead")
+            }
         }
         if !glUp {
             HuskLog.log("qemu", "using the software display")
@@ -1692,6 +1743,7 @@ final class QemuRunner: ObservableObject {
         qemu_main_loop()
 
         HuskLog.log("qemu", "qemu_main_loop() RETURNED -- guest stopped")
+        GPUGuard.clear("QEMU shut down normally")
         HuskLog.logFootprint("after-main-loop")
         qemu_cleanup()
         HuskLog.log("qemu", "qemu_cleanup() done")
@@ -1743,6 +1795,13 @@ final class QemuRunner: ObservableObject {
                 lastAudioSilent = aSilent
                 let seconds = interval
                 let rate = Double(delta) / seconds
+                if QemuRunner.glProven, glFrames > 0 || QemuRunner.didRestore {
+                    if QemuRunner.bootCompletedAt != nil {
+                        GPUGuard.clear("GPU machine reached boot_completed")
+                    } else if QemuRunner.didRestore, elapsedSec >= 120 {
+                        GPUGuard.clear("restored GPU machine ran two minutes")
+                    }
+                }
                 DispatchQueue.main.async { [weak self] in self?.fps = rate }
                 HuskLog.log("perf", "guest produced \(delta) frames in \(Int(seconds))s "
                                   + "(\(String(format: "%.1f", rate)) fps)"
@@ -1975,6 +2034,28 @@ final class QemuRunner: ObservableObject {
                                     "\(r.bootProgress)%  ·  \(milestone)  ·  \(stamp) elapsed"
                             }
                             break
+                        }
+                    }
+
+                    // GPUGuard: a GPU cold boot that keeps losing its framework
+                    // to Android's watchdog arms the CPU fallback for next launch.
+                    if QemuRunner.glProven, !QemuRunner.didRestore,
+                       QemuRunner.bootCompletedAt == nil,
+                       line.contains("Service 'zygote' (pid") {
+                        QemuRunner.glColdBootFrameworkRestarts += 1
+                        let n = QemuRunner.glColdBootFrameworkRestarts
+                        HuskLog.log("gl", "GPU cold boot: Android framework restart #\(n) "
+                                        + "before boot_completed")
+                        if n == 3 {
+                            GPUGuard.turnOff("GPU cold boot: Android restarted its framework "
+                                             + "\(n) times without finishing (watchdog)")
+                            Task { @MainActor in
+                                AndroidHost.shared.say(
+                                    "GPU boot is struggling",
+                                    "Android keeps restarting. Quit and reopen Husk to use the "
+                                    + "CPU renderer and the saved machine.",
+                                    good: false)
+                            }
                         }
                     }
 

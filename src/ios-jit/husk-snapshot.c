@@ -34,6 +34,23 @@
 #include "husk-snapshot.h"
 
 #define HUSK_SNAPSHOT_NAME "husk-ready"
+
+/*
+ * Which internal snapshot this process saves to and restores from.
+ *
+ * The app sets HUSK_SNAPSHOT_NAME before qemu_init(): "husk-ready" for a
+ * software-display machine (virtio-gpu-pci -- the one the shipped snapshot is),
+ * "husk-ready-gl" for a GPU one (virtio-gpu-gl-pci). The two machines are not
+ * interchangeable, and with a single name a GPU save overwrote the shipped
+ * software snapshot -- so falling back to the CPU renderer afterwards meant a
+ * cold boot, which on iPadOS 15 / A12Z never finishes (Android's watchdog).
+ * Keeping both lets the app switch renderers and still restore.
+ */
+static const char *husk_snapshot_name(void)
+{
+    const char *n = getenv("HUSK_SNAPSHOT_NAME");
+    return (n && *n) ? n : HUSK_SNAPSHOT_NAME;
+}
 /* Node name of the userdata qcow2. Without naming a target QEMU writes the
  * VM state to whichever snapshot-capable drive comes first, which is the
  * UEFI variable store -- a 64 MiB file that grew past 2.6 GB. */
@@ -97,9 +114,10 @@ static void husk_save_bh(void *opaque)
      * into the snapshot -- is "stopped", so the restored machine comes back
      * paused and the screen never moves again.
      */
-    ok = save_snapshot(HUSK_SNAPSHOT_NAME, true, HUSK_VMSTATE_NODE,
+    ok = save_snapshot(husk_snapshot_name(), true, HUSK_VMSTATE_NODE,
                        true, &husk_snapshot_devices, &err);
 
+    fprintf(stderr, "[husk-snap] save target '%s'\n", husk_snapshot_name());
     husk_report(ok, "save", err);
     error_free(err);
 }
@@ -130,7 +148,7 @@ bool husk_snapshot_load_at_startup(void)
     saved = runstate_get();
     vm_stop(RUN_STATE_RESTORE_VM);
 
-    ok = load_snapshot(HUSK_SNAPSHOT_NAME, HUSK_VMSTATE_NODE,
+    ok = load_snapshot(husk_snapshot_name(), HUSK_VMSTATE_NODE,
                        true, &husk_snapshot_devices, &err);
     if (!ok) {
         /*
@@ -146,7 +164,7 @@ bool husk_snapshot_load_at_startup(void)
     }
 
     fprintf(stderr, "[husk-snap] restored '%s' -- Android is already booted\n",
-            HUSK_SNAPSHOT_NAME);
+            husk_snapshot_name());
     /*
      * Resume running whatever the machine was doing before, rather than
      * whatever state the snapshot happened to be taken in.

@@ -143,10 +143,18 @@ struct PerformanceSettings: View {
     @State private var perfMode = QemuRunner.performanceMode
     @State private var renderScale = QemuRunner.performanceRenderScale
 
-    private var gpuAvailable: Bool {
-        if #available(iOS 16.4, *) { return true }
-        return false
-    }
+    @State private var gpuAutoOff = GPUGuard.autoOffReason
+
+    private static let gpuFooter: String =
+        "Android draws on the iPad's GPU (virtio-gpu-gl, virglrenderer, ANGLE, Metal) "
+        + "instead of rasterising every pixel inside the emulated CPU. The first GPU "
+        + "launch boots Android from cold and then saves its own machine; the CPU "
+        + "renderer's saved machine is kept. If a GPU start fails, Husk switches back "
+        + "to CPU by itself. Takes effect on the next launch."
+    private static let cpuFooter: String =
+        "Every pixel is drawn by the emulated CPU (the 0.8.x behaviour). Restores the "
+        + "shipped machine in seconds, but Android is very slow. Takes effect on the "
+        + "next launch."
 
     var body: some View {
         Form {
@@ -185,35 +193,31 @@ struct PerformanceSettings: View {
                      : "Full guest compositor load. Prefer this only when GL is available.")
             }
 
-            if gpuAvailable {
-                Section {
-                    Picker("Renderer", selection: $gpuMode) {
-                        Text("GPU").tag(true)
-                        Text("CPU").tag(false)
-                    }
-                    .pickerStyle(.segmented)
-                    .onChange(of: gpuMode) { v in
-                        UserDefaults.standard.set(v, forKey: "husk.gpuMode")
-                        HuskLog.log("ui", v ? "GPU renderer selected" : "CPU renderer selected")
-                    }
-                } header: {
-                    Text("Renderer")
-                } footer: {
-                    Text(gpuMode
-                         ? "Android draws on the real GPU through Metal — about four times "
-                         + "the frame rate. This is the default."
-                         : "Every pixel is drawn by the emulated CPU. Much slower, and only "
-                         + "worth choosing if the GPU misbehaves.")
+            Section {
+                Picker("Renderer", selection: $gpuMode) {
+                    Text("GPU").tag(true)
+                    Text("CPU").tag(false)
                 }
-            } else {
-                Section {
-                    DetailRow(label: "Renderer", value: "CPU (required on iOS 15)")
-                } header: {
-                    Text("Renderer")
-                } footer: {
-                    Text("The ANGLE/Metal GL stack in this build needs iOS 16.4+. "
-                       + "On iPadOS 15 every frame is software-rasterised inside TCG.")
+                .pickerStyle(.segmented)
+                .onChange(of: gpuMode) { v in
+                    UserDefaults.standard.set(v, forKey: "husk.gpuMode")
+                    GPUGuard.userChoseRenderer(gpu: v)
+                    gpuAutoOff = nil
+                    HuskLog.log("ui", v ? "GPU renderer selected" : "CPU renderer selected")
                 }
+                if gpuMode, let why = gpuAutoOff {
+                    Button("Use the GPU again") {
+                        GPUGuard.userChoseRenderer(gpu: true)
+                        gpuAutoOff = nil
+                    }
+                    Text("Turned off automatically: \(why)")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+            } header: {
+                Text("Renderer")
+            } footer: {
+                Text(gpuMode ? Self.gpuFooter : Self.cpuFooter)
             }
 
             Section {
