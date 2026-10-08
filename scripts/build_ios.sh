@@ -9,6 +9,8 @@
 # Usage: ./scripts/build_ios.sh [stage ...]      (no args = all stages)
 #        stages: libffi glib pixman libucontext libslirp qemu
 # iOS 15 port: prefer Xcode 16 SDK (see scripts/ci_build.sh). Cache-bust for xcode16 rebuild.
+# 0.9.0: QEMU is built with OpenGL + virglrenderer again (ANGLE/epoxy/virgl at an
+# iOS 15 floor, see build_angle_ios.sh / build_gpu_ios.sh).
 set -uo pipefail
 
 HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -208,7 +210,7 @@ stage_qemu() {
             --enable-slirp \
             --disable-cocoa --disable-sdl --disable-gtk --disable-coreaudio \
             --disable-vnc --disable-spice \
-            --disable-opengl --disable-virglrenderer \
+            --enable-opengl --enable-virglrenderer \
             --disable-curses --disable-curl --disable-libusb --disable-usb-redir \
             --disable-tpm --disable-docs --disable-guest-agent --disable-tools \
             --disable-hvf --disable-vde --disable-brlapi --disable-libssh \

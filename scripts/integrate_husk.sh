@@ -67,13 +67,14 @@ if "husk-brk.S" not in s:
 else:
     print("  tcg/meson.build: already wired")
 
-# ui/meson.build: the software display bridge and the legacy GL ABI stubs.
+# ui/meson.build: the software display bridge and the GL ABI stubs.
 #
-# This branch deliberately configures QEMU with --disable-opengl.  The Swift
-# app still links against Husk's public husk_display_gl_* symbols, so the stub
-# implementation must be compiled unconditionally in this software-only build.
-# Do not hide it behind QEMU's CONFIG_OPENGL source-set expression: Meson's
-# generated target did not pick that false branch up reliably in the UTM fork.
+# husk-display-gl-stub.c is listed unconditionally and decides for itself from
+# config-host.h: it compiles to nothing when QEMU has CONFIG_OPENGL (the real
+# bridge, husk-display-gl.c, is in the OpenGL source set below) and to "no GL"
+# stubs when it does not. Do not hide it behind QEMU's CONFIG_OPENGL source-set
+# expression: Meson's generated target did not pick that false branch up
+# reliably in the UTM fork.
 p = q / "ui/meson.build"
 s = p.read_text()
 old = "system_ss.add(files(\n"
@@ -91,8 +92,9 @@ if changed:
 else:
     print("  ui/meson.build: software display + GL ABI stubs already wired")
 
-# Keep the real GL bridge in the OpenGL source set for a future legacy-GPU
-# experiment.  It is not compiled in the current --disable-opengl build.
+# The real GL bridge lives in the OpenGL source set, beside QEMU's own
+# shader.c/console-gl.c, so it inherits that condition. 0.9.0 builds QEMU with
+# --enable-opengl --enable-virglrenderer again, so this is what ships.
 s = p.read_text()
 if "husk-display-gl.c" not in s:
     old_gl = "if_true: files('shader.c', 'console-gl.c'))"

@@ -106,9 +106,11 @@ elif [ -n "$EXE" ]; then
     printf "  ok       %-28s %s\n" "executable present" "$EXE"
 fi
 
-# The legacy bring-up intentionally omits ANGLE and virgl. Only QEMU is a
-# required embedded dylib; iOS 15 uses Husk's software framebuffer.
-for lib in libqemu-aarch64-softmmu.dylib; do
+# Both are required: QEMU itself, and ANGLE, which QEMU's epoxy dlopens by
+# @rpath when the GPU renderer starts. A bundle missing ANGLE launches fine and
+# then dies at GL start with "Couldn't open @rpath/libANGLE-shared.dylib" (the
+# app falls back to the software display, but GPU would never work).
+for lib in libqemu-aarch64-softmmu.dylib libANGLE-shared.dylib; do
     if [ ! -f "$APP/Frameworks/$lib" ]; then
         echo "  MISSING  Frameworks/$lib" >&2
         rc=1

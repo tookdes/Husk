@@ -105,6 +105,15 @@ targets:
         embed: true
         codeSign: true
         link: false
+      # ANGLE (EGL + GLES over Metal), which the QEMU dylib's epoxy dlopens by
+      # @rpath at GL start-up. Embedded but NOT linked: nothing in the app
+      # references its symbols directly, so dyld never touches it unless the
+      # GPU renderer is actually used. Built for an iOS 15.0 floor by
+      # scripts/build_angle_ios.sh (UTM's WebKit fork).
+      - framework: ../../build/ios-arm64/sysroot/lib/libANGLE-shared.dylib
+        embed: true
+        codeSign: true
+        link: false
     preBuildScripts:
       - name: Stage guest image
         # The Phase 0 guest is far too large for git, so it is fetched rather than

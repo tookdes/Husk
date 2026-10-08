@@ -38,6 +38,20 @@ fetch virgl https://github.com/utmapp/virglrenderer.git "$VIRGL_COMMIT"
 
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 
+# Rebuild only when the pinned commits, the epoxy patch or the deployment
+# target change. The CI cache restores build/ios-arm64 from older runs, and a
+# library left there by a build with a different floor must not be reused.
+MINOS="${SDKMINVER:-15.0}"
+STAMP="$PREFIX/lib/.gpu-stamp"
+WANT_STAMP="epoxy=$EPOXY_COMMIT virgl=$VIRGL_COMMIT ios$MINOS patch=$(shasum "$HUSK_ROOT/patches/husk-epoxy-ios-egl-path.patch" | cut -c1-12)"
+if [ -f "$PREFIX/lib/libepoxy.a" ] && [ -f "$PREFIX/lib/libvirglrenderer.a" ] \
+   && [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT_STAMP" ]; then
+    echo "==> libepoxy + virglrenderer already built ($WANT_STAMP); skipping"
+    exit 0
+fi
+grep -q "ios$MINOS" "$HUSK_ROOT/build/ios-arm64/cross-ios.meson" \
+    || { echo "cross-ios.meson does not target ios$MINOS; run build_ios.sh first" >&2; exit 1; }
+
 echo "==> libepoxy"
 # epoxy dlopens EGL by a hardcoded per-platform name, and on iOS that is
 # "EGL.framework/EGL". UTM satisfies it by packaging ANGLE as a framework; Husk
@@ -52,7 +66,8 @@ echo "==> libepoxy"
       --prefix "$PREFIX" --default-library=static \
       -Dtests=false -Dglx=no -Degl=yes -Dx11=false
   $NINJA -C _build install ) > "$LOGS/epoxy.log" 2>&1 \
-  || { echo "epoxy failed:" >&2; grep -a "error:\|FAILED:" "$LOGS/epoxy.log" | head -10 >&2; exit 1; }
+  || { echo "epoxy failed:" >&2; grep -a "error:\|FAILED:" "$LOGS/epoxy.log" | head -10 >&2
+       tail -n 80 "$LOGS/epoxy.log" >&2; exit 1; }
 echo "    $(ls -lh "$PREFIX/lib/libepoxy.a" | awk '{print $5}')"
 
 echo "==> virglrenderer (render server in thread mode)"
@@ -73,7 +88,9 @@ echo "==> virglrenderer (render server in thread mode)"
       -Dtests=false -Dcheck-gl-errors=false -Dvenus=false -Dvulkan-dload=false \
       -Drender-server-mode=thread
   $NINJA -C _build install ) > "$LOGS/virgl.log" 2>&1 \
-  || { echo "virglrenderer failed:" >&2; grep -a "error:\|FAILED:\|ERROR" "$LOGS/virgl.log" | head -10 >&2; exit 1; }
+  || { echo "virglrenderer failed:" >&2; grep -a "error:\|FAILED:\|ERROR" "$LOGS/virgl.log" | head -10 >&2
+       tail -n 80 "$LOGS/virgl.log" >&2; exit 1; }
 echo "    $(ls -lh "$PREFIX/lib/libvirglrenderer.a" | awk '{print $5}')"
 
+echo "$WANT_STAMP" > "$STAMP"
 echo "==> done; QEMU can now be configured with --enable-opengl --enable-virglrenderer"

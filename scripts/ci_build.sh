@@ -39,8 +39,24 @@ esac
 step "fetch sources"
 ./scripts/fetch_sources.sh
 
+# ANGLE first: it needs nothing from the other stages and is by far the
+# longest single build, so a failure here surfaces in minutes, not after QEMU.
+# iOS 15 floor (UTM's WebKit fork, as UTM ships it); see build_angle_ios.sh.
+step "ANGLE (EGL/GLES over Metal, iOS ${SDKMINVER:-15.0} floor)"
+SDKMINVER="${SDKMINVER:-15.0}" ANGLE_IOS_MIN="${SDKMINVER:-15.0}" ./scripts/build_angle_ios.sh
+
 step "dependencies: libffi glib pixman libucontext libslirp"
 ./scripts/build_ios.sh libffi glib pixman libucontext libslirp
+
+# build_gpu_ios.sh asks for cross-ios-darwin.meson, which no script generates.
+# build_ios.sh writes cross-darwin.meson, the file it describes (host system
+# darwin, subsystem ios), under a different name.
+cp build/ios-arm64/cross-darwin.meson build/ios-arm64/cross-ios-darwin.meson
+
+step "libepoxy + virglrenderer"
+# build_ios.sh's cross environment, which the GPU script assumes is set.
+PKG_CONFIG_LIBDIR="$HUSK_ROOT/build/ios-arm64/sysroot/lib/pkgconfig:$HUSK_ROOT/build/ios-arm64/sysroot/share/pkgconfig" \
+    SDKMINVER="${SDKMINVER:-15.0}" ./scripts/build_gpu_ios.sh
 
 step "QEMU"
 ./scripts/build_ios.sh qemu
