@@ -233,14 +233,33 @@ enum JITBootstrap {
         return rc == 0 ? flags : nil
     }
 
+    /// StikDebug / StikJIT URL scheme. Only meaningful on iOS 26+ (TXM). On
+    /// iOS 15 we never query it -- canOpenURL("stikjit://") spams the console
+    /// with OSStatus -10814 when StikJIT is not installed.
     static var isStikDebugInstalled: Bool {
-        URL(string: "stikjit://").map(UIApplication.shared.canOpenURL) ?? false
+        if !deviceEnforcesTXM {
+            return false
+        }
+        if let cached = stikDebugInstallCached { return cached }
+        let ok = URL(string: "stikjit://").map(UIApplication.shared.canOpenURL) ?? false
+        stikDebugInstallCached = ok
+        return ok
     }
+    nonisolated(unsafe) private static var stikDebugInstallCached: Bool?
 
-    /// TrollStore answers enable-jit on the `apple-magnifier` scheme.
+    /// Whether something answers `apple-magnifier://` (TrollStore with URL
+    /// Scheme on, OR Apple Magnifier / Persistence Helper). Not proof that
+    /// enable-jit works -- prefer `isInstalledWithTrollStore` for routing.
     static var isTrollStoreInstalled: Bool {
         URL(string: "apple-magnifier://").map(UIApplication.shared.canOpenURL) ?? false
     }
+
+    /// True when apple-magnifier looks answerable AND we have not already seen
+    /// the URL handoff open the wrong Helper / Magnifier without attaching.
+    static var trollStoreURLHandoffAllowed: Bool {
+        isTrollStoreInstalled && !trollStoreURLHandoffFailed
+    }
+    nonisolated(unsafe) private static var trollStoreURLHandoffFailed = false
 
     /// Whether this copy of Husk was installed by TrollStore (or TrollStore Lite).
     /// TrollStore leaves `_TrollStore` / `_TrollStoreLite` next to the `.app` in
@@ -331,15 +350,42 @@ enum JITBootstrap {
     /// Set while we are waiting for an enable-jit hand-off we initiated.
     nonisolated(unsafe) private static var trollStoreAttachPending = false
 
+    /// Begin waiting for the user to enable JIT via TrollStore's app-list
+    /// "Open with JIT" (primary path on iOS 15). Does NOT open apple-magnifier://.
     @MainActor
-    static func requestTrollStoreAttach() -> Bool {
-        HuskLog.log("jit", "requestTrollStoreAttach() -- handing off to TrollStore")
+    static func beginWaitingForManualTrollStoreJIT() {
+        HuskLog.log("jit", "waiting for manual TrollStore Open with JIT "
+                         + "(will poll CS_DEBUGGED; not opening apple-magnifier://)")
+        if trollStoreBGTask == .invalid {
+            trollStoreBGTask = UIApplication.shared.beginBackgroundTask(withName: "Husk TrollStore JIT") {
+                if trollStoreBGTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(trollStoreBGTask)
+                    trollStoreBGTask = .invalid
+                }
+            }
+        }
+        trollStoreAttachPending = true
+        trollStoreAttachRetriesLeft = 0
+        trollStoreURLPending = false
+    }
+
+    /// Secondary: try `apple-magnifier://enable-jit` (needs TrollStore ≥2.0.12
+    /// with URL Scheme enabled). On many iOS 15 installs this opens Magnifier /
+    /// Persistence Helper instead and never attaches -- disabled after one miss.
+    @MainActor
+    static func requestTrollStoreURLHandoff() -> Bool {
+        HuskLog.log("jit", "requestTrollStoreURLHandoff() -- secondary apple-magnifier path")
+        guard !trollStoreURLHandoffFailed else {
+            HuskLog.log("jit", "URL handoff previously failed (wrong Helper/Magnifier); not retrying")
+            return false
+        }
         guard let bundleID = Bundle.main.bundleIdentifier else { return false }
 
         let url = "apple-magnifier://enable-jit?bundle-id=\(bundleID)"
         guard let launchURL = URL(string: url), UIApplication.shared.canOpenURL(launchURL) else {
-            HuskLog.log("jit", "FAIL: cannot open apple-magnifier:// -- TrollStore is not installed "
-                             + "or its URL Scheme setting is off")
+            HuskLog.log("jit", "FAIL: cannot open apple-magnifier:// -- TrollStore URL Scheme "
+                             + "off, or Magnifier/Helper owns the scheme without enable-jit")
+            trollStoreURLHandoffFailed = true
             return false
         }
 
@@ -353,24 +399,36 @@ enum JITBootstrap {
         }
 
         trollStoreAttachPending = true
-        trollStoreAttachRetriesLeft = 2
+        trollStoreURLPending = true
+        trollStoreAttachRetriesLeft = 0
         HuskLog.log("jit", "opening apple-magnifier://enable-jit for bundle \(bundleID) "
-                         + "(TrollStore status 3 = ESRCH: process not found -- keep Husk "
-                         + "alive; we hold a background task and will retry on return)")
+                         + "(secondary; if Magnifier/Helper opens with no JIT, use "
+                         + "TrollStore → Open with JIT instead)")
         UIApplication.shared.open(launchURL)
         return true
     }
 
-    nonisolated(unsafe) private static var trollStoreAttachRetriesLeft = 0
+    /// Kept for call sites that still name "requestTrollStoreAttach": on this
+    /// branch that means "start waiting for Open with JIT", not the broken URL.
+    @MainActor
+    @discardableResult
+    static func requestTrollStoreAttach() -> Bool {
+        beginWaitingForManualTrollStoreJIT()
+        return true
+    }
 
-    /// Call when returning to the foreground after an enable-jit hand-off we
-    /// started. No-op unless requestTrollStoreAttach() set the pending flag.
+    nonisolated(unsafe) private static var trollStoreAttachRetriesLeft = 0
+    nonisolated(unsafe) private static var trollStoreURLPending = false
+
+    /// Call when returning to the foreground after a manual Open with JIT or a
+    /// secondary URL handoff. Never auto-reopens apple-magnifier://.
     @MainActor
     static func retryTrollStoreAttachIfNeeded() {
         guard trollStoreAttachPending else { return }
         if debuggedFlag {
             HuskLog.log("jit", "TrollStore attach confirmed (CS_DEBUGGED set)")
             trollStoreAttachPending = false
+            trollStoreURLPending = false
             trollStoreAttachRetriesLeft = 0
             invalidateExecutableProbeCache()
             if trollStoreBGTask != .invalid {
@@ -379,27 +437,26 @@ enum JITBootstrap {
             }
             return
         }
-        guard trollStoreAttachRetriesLeft > 0 else {
-            HuskLog.log("jit", "TrollStore attach still missing after retries; giving up")
-            trollStoreAttachPending = false
-            if trollStoreBGTask != .invalid {
-                UIApplication.shared.endBackgroundTask(trollStoreBGTask)
-                trollStoreBGTask = .invalid
-            }
-            return
+        if trollStoreURLPending {
+            // URL handoff returned without CS_DEBUGGED -- treat as broken on
+            // this device (Magnifier / wrong Helper) and stop offering it.
+            HuskLog.log("jit", "URL handoff returned without CS_DEBUGGED; "
+                             + "marking apple-magnifier enable-jit as broken here. "
+                             + "Use TrollStore → long-press Husk → Open with JIT.")
+            trollStoreURLHandoffFailed = true
+            trollStoreURLPending = false
         }
-        trollStoreAttachRetriesLeft -= 1
-        HuskLog.log("jit", "CS_DEBUGGED still clear after returning from TrollStore; "
-                         + "retrying enable-jit (\(trollStoreAttachRetriesLeft) left)")
-        // requestTrollStoreAttach resets retries; preserve remaining count.
-        let left = trollStoreAttachRetriesLeft
-        _ = requestTrollStoreAttach()
-        trollStoreAttachRetriesLeft = left
+        // Keep pending so the UI poll can still succeed after Open with JIT.
     }
 
     @MainActor
     static func requestAttach() -> Bool {
         HuskLog.log("jit", "requestAttach() -- handing off to StikDebug")
+        guard deviceEnforcesTXM else {
+            HuskLog.log("jit", "skipping StikDebug URL on pre-TXM (iOS 15); "
+                             + "use TrollStore Open with JIT")
+            return false
+        }
 
         guard let bundleID = Bundle.main.bundleIdentifier else {
             HuskLog.log("jit", "FAIL: no bundle identifier")

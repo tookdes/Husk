@@ -30,8 +30,9 @@ struct JITCard: View {
     private var explanation: String {
         switch offered {
         case .trollStore:
-            return "TrollStore can turn JIT on for Husk: it opens Husk and enables it, with no computer. "
-                 + "In TrollStore's Settings, URL Scheme must be on."
+            return "In TrollStore, long-press Husk → Open with JIT. "
+                 + "（在 TrollStore 长按 Husk → Open with JIT。） "
+                 + "Keep Husk open; do not use the Magnifier jump if it opens Helper with no JIT."
         case .jailbreak:
             return "On a jailbroken device JIT is a setting. In Dopamine, turn on Allow JIT in Apps, then open Husk again."
         case .stikDebug:
@@ -44,7 +45,7 @@ struct JITCard: View {
 
     private var buttonTitle: String {
         switch offered {
-        case .trollStore: return "Turn On JIT with TrollStore"
+        case .trollStore: return "How to Open with JIT"
         case .jailbreak: return "How to Allow JIT"
         case .stikDebug: return "Turn On JIT with StikDebug"
         default: return HuskBuiltInJIT.isAvailable ? "Turn On JIT with StikJIT" : "Turn On JIT"

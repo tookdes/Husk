@@ -137,16 +137,21 @@ final class JITCoordinator: ObservableObject {
 
     var resolvedMethod: JITMethod {
         guard method == .automatic else { return method }
+        // Prefer the install marker over apple-magnifier canOpenURL: on iOS 15
+        // Magnifier/Helper can claim the scheme without supporting enable-jit.
+        if JITBootstrap.isInstalledWithTrollStore { return .trollStore }
+        if JITBootstrap.isJailbroken { return .jailbreak }
+        // StikDebug only on TXM; isStikDebugInstalled is gated and never
+        // canOpenURL-spams on iOS 15.
         if JITBootstrap.isStikDebugInstalled { return .stikDebug }
         if JITBootstrap.isTrollStoreInstalled { return .trollStore }
-        if JITBootstrap.isJailbroken { return .jailbreak }
         return .builtIn
     }
 
     var automaticDescription: String {
         switch resolvedMethod {
         case .stikDebug: return "StikDebug is installed, so Husk will open it."
-        case .trollStore: return "TrollStore is installed, so Husk will ask it to enable JIT."
+        case .trollStore: return "Husk was installed with TrollStore. Use TrollStore → Open with JIT (URL handoff is secondary)."
         case .jailbreak: return "This device is jailbroken, so JIT comes from the jailbreak's Allow JIT in Apps setting."
         default: return "StikDebug, TrollStore and a jailbreak were not found, so Husk will use its built-in helper."
         }
@@ -168,17 +173,22 @@ final class JITCoordinator: ObservableObject {
         case .automatic:
             assertionFailure("Automatic must resolve to a concrete JIT method")
         case .stikDebug:
-            if !JITBootstrap.requestAttach(), !JITBootstrap.requestTrollStoreAttach() {
-                error = "StikDebug is not installed. Install it, or set up Built-in StikJIT."
-                showSetup = true
+            if !JITBootstrap.requestAttach() {
+                if JITBootstrap.isInstalledWithTrollStore {
+                    JITBootstrap.beginWaitingForManualTrollStoreJIT()
+                    awaitTrollStore()
+                    showSetup = true
+                } else {
+                    error = "StikDebug is not installed. Install it, or set up Built-in StikJIT."
+                    showSetup = true
+                }
             }
         case .trollStore:
-            if JITBootstrap.requestTrollStoreAttach() {
-                awaitTrollStore()
-            } else {
-                error = "TrollStore could not be opened. Install Husk through TrollStore, or choose another method."
-                showSetup = true
-            }
+            // Primary: instruct Open with JIT and poll. Do NOT jump to
+            // apple-magnifier:// (opens Magnifier/Helper on this device).
+            JITBootstrap.beginWaitingForManualTrollStoreJIT()
+            awaitTrollStore()
+            showSetup = true
         case .jailbreak:
             // Nothing to ask: a jailbreak marks an app as debugged as it opens, if it has been told to. Say what to turn on.
             error = "Turn on Allow JIT in Apps in Dopamine's settings, then open Husk again."
@@ -193,31 +203,41 @@ final class JITCoordinator: ObservableObject {
         }
     }
 
-    /// After TrollStore is asked: it opens Husk again and attaches to it for a moment, which marks the process as debugged. Watch for
-    /// that, so the Games tab and the Library notice without waiting for another trip to the foreground, and say what to check if
-    /// it never comes -- TrollStore only answers enable-jit once its URL Scheme setting is on.
+    /// Poll CS_DEBUGGED while the user enables JIT from TrollStore's app list
+    /// (long-press Husk → Open with JIT). That is the reliable iOS 15 path;
+    /// apple-magnifier://enable-jit is optional and often opens Magnifier instead.
     private func awaitTrollStore() {
         busy = true
-        status = "Waiting for TrollStore to enable JIT…"
-        log("waiting for TrollStore's attach")
-        _ = Self.waitForDebugger(timeout: 60) { [weak self] attached in
+        status = "Waiting for TrollStore… Open with JIT from TrollStore, then return here. / 等待中：在 TrollStore 里长按 Husk → Open with JIT，再回到这里。"
+        log("waiting for TrollStore Open with JIT (polling CS_DEBUGGED)")
+        _ = Self.waitForDebugger(timeout: 120) { [weak self] attached in
             guard let self else { return }
             busy = false
             if attached {
                 status = "JIT is on."
                 error = nil
                 attachGeneration += 1
-                log("TrollStore enabled JIT")
+                log("TrollStore enabled JIT (CS_DEBUGGED set)")
             } else {
                 status = nil
-                error = "TrollStore did not enable JIT. Turn on URL Scheme in TrollStore Settings. "
-                      + "If TrollStore showed status 3, that is ESRCH (process not found): open Husk "
-                      + "first, then tap Enable JIT here (do not use Open with JIT while Husk is closed). "
-                      + "Husk must keep running so RootHelper can ptrace it."
-                log("TrollStore did not enable JIT within a minute (status 3 = ESRCH is the common cause)")
+                error = "JIT is still off. In TrollStore, long-press Husk → Open with JIT, "
+                      + "keep Husk in the foreground until it returns. "
+                      + "（仍未开启：在 TrollStore 长按 Husk → Open with JIT。） "
+                      + "Do not rely on the in-app Magnifier jump if it opens Helper with no JIT UI."
+                log("TrollStore Open with JIT did not set CS_DEBUGGED within timeout")
                 showSetup = true
             }
         }
+    }
+
+    /// Secondary button: try apple-magnifier URL once (TrollStore ≥2.0.12 + URL Scheme).
+    func tryTrollStoreURLHandoff() {
+        guard JITBootstrap.requestTrollStoreURLHandoff() else {
+            error = "URL handoff unavailable. Use TrollStore → Open with JIT. "
+                  + "（无法用链接开启，请用 TrollStore → Open with JIT。）"
+            return
+        }
+        awaitTrollStore()
     }
 
     func importPairingFile(_ source: URL) {

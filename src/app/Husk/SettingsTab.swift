@@ -477,9 +477,20 @@ struct JITSettings: View {
                     }
                     .disabled(jit.busy)
                     Button {
-                        _ = JITBootstrap.requestTrollStoreAttach()
+                        jit.method = .trollStore
+                        JITBootstrap.beginWaitingForManualTrollStoreJIT()
+                        jit.enable()
                     } label: {
-                        Label("Enable JIT with TrollStore", systemImage: "sparkles")
+                        Label("Wait for TrollStore Open with JIT", systemImage: "sparkles")
+                    }
+                    .disabled(jit.busy)
+                    if JITBootstrap.trollStoreURLHandoffAllowed {
+                        Button {
+                            jit.tryTrollStoreURLHandoff()
+                        } label: {
+                            Label("Try URL handoff (secondary)", systemImage: "link")
+                        }
+                        .disabled(jit.busy)
                     }
                 }
             } header: {

@@ -74,9 +74,10 @@ struct JITSetupFlow: View {
                         : "Enable JIT through the StikDebug app.",
                     done: jit.method == .stikDebug) { path.append(.stikDebug) }
                 way("Use TrollStore", symbol: "sparkles",
-                    detail: JITBootstrap.isTrollStoreInstalled ? "TrollStore is installed."
+                    detail: JITBootstrap.isInstalledWithTrollStore
+                        ? "Installed via TrollStore — use Open with JIT."
                         : "For a Husk installed through TrollStore.",
-                    done: jit.method == .trollStore) { path.append(.trollStore) }
+                    done: jit.method == .trollStore || JITBootstrap.isInstalledWithTrollStore) { path.append(.trollStore) }
                 way("Use a jailbreak", symbol: "lock.open",
                     detail: JITBootstrap.debuggedAtLaunch ? "JIT was already on when Husk opened."
                         : JITBootstrap.isJailbroken ? "A jailbreak was found. Turn on Allow JIT in Apps."
@@ -353,30 +354,56 @@ struct JITSetupFlow: View {
     private var trollStore: some View {
         page(symbol: "sparkles", title: "Use TrollStore",
              subtitle: "TrollStore can enable JIT for apps it installed, with no pairing file, "
-                     + "VPN or computer.") {
+                     + "VPN or computer. On iOS 15 the reliable way is Open with JIT from TrollStore's list.") {
             VStack(alignment: .leading, spacing: 14) {
-                point(1, "Install Husk.ipa through TrollStore, on an iOS version TrollStore supports. It carries the "
-                       + "entitlements TrollStore keeps, so the same file works there and in a sideloader.",
+                point(1, "Install Husk.ipa through TrollStore (this copy must show the TrollStore marker).",
                       done: JITBootstrap.isInstalledWithTrollStore)
-                point(2, "In TrollStore's Settings, turn on URL Scheme. TrollStore ignores enable-jit requests without it.",
-                      done: JITBootstrap.isTrollStoreInstalled)
-                point(3, "Whenever Android or a game starts, Husk asks TrollStore to enable JIT. TrollStore opens Husk, "
-                       + "attaches to it for a moment and lets go, which leaves it allowed to run code it wrote.")
+                point(2, "**Primary:** In TrollStore, long-press **Husk** → **Open with JIT**. "
+                       + "Keep Husk open; Husk polls until CS_DEBUGGED is set.\n"
+                       + "主要方法：在 TrollStore 里长按 Husk → Open with JIT，保持 Husk 在前台。",
+                      done: JITBootstrap.canExecuteJITCode)
+                point(3, "Optional: TrollStore Settings → URL Scheme (needs TrollStore 2.0.12+). "
+                       + "If apple-magnifier opens Magnifier/Helper with no JIT UI, ignore it and use Open with JIT.\n"
+                       + "可选：若链接跳到放大镜/Helper 且没有 JIT，请忽略，只用 Open with JIT。",
+                      done: false)
             }
             .padding(16).huskCard()
-            if !JITBootstrap.isTrollStoreInstalled {
-                Label("TrollStore was not found on this \(device). Husk can only use it once it is installed "
-                    + "and Husk was installed through it.", systemImage: "info.circle")
+            if jit.busy {
+                HStack(spacing: 11) {
+                    ProgressView().tint(Theme.accent)
+                    Text(jit.status ?? "Waiting…").font(.system(size: 14)).foregroundStyle(Theme.text)
+                    Spacer(minLength: 0)
+                }
+                .padding(16).huskCard(high: true)
+            } else if JITBootstrap.canExecuteJITCode {
+                outcome("JIT is on.", ok: true)
+            } else if let error = jit.error {
+                outcome(error, ok: false)
+            }
+            if !JITBootstrap.isInstalledWithTrollStore {
+                Label("Husk does not look TrollStore-installed on this \(device).", systemImage: "info.circle")
                     .font(.system(size: 13)).foregroundStyle(Theme.textDim)
                     .fixedSize(horizontal: false, vertical: true)
             }
         } actions: {
-            Button("Use TrollStore") {
-                jit.method = .trollStore
-                HuskLog.log("ui", "JIT method set to TrollStore")
-                close()
+            if JITBootstrap.canExecuteJITCode {
+                Button("Done") { close() }.buttonStyle(PrimaryButtonStyle())
+            } else {
+                Button("I'm waiting — poll for JIT") {
+                    jit.method = .trollStore
+                    JITBootstrap.beginWaitingForManualTrollStoreJIT()
+                    jit.enable()
+                    HuskLog.log("ui", "JIT method set to TrollStore; polling Open with JIT")
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                if JITBootstrap.trollStoreURLHandoffAllowed {
+                    Button("Try URL handoff (secondary)") {
+                        jit.method = .trollStore
+                        jit.tryTrollStoreURLHandoff()
+                    }
+                    .font(.system(size: 15, weight: .medium))
+                }
             }
-            .buttonStyle(PrimaryButtonStyle())
         }
     }
 

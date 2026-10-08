@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 
 /* Runs when libqemu is dlopened (no longer at process start). mkdir
  * Documents — it does not exist yet in a fresh container. */
@@ -133,6 +134,25 @@ static bool husk_cs_debugged(void)
         return false;
     }
     return (flags & CS_DEBUGGED) != 0;
+}
+
+/*
+ * TXM (Trusted Execution Monitor) arrived with iOS 26. On pre-TXM, TrollStore
+ * Open-with-JIT attaches via trollstorehelper as a live debugger: CS_DEBUGGED
+ * is set, but BRK is delivered as fatal EXC_BREAKPOINT (not SIGTRAP), so our
+ * trap-guard never sees it. husk_brk_probe under that debugger always kills
+ * the process. Never emit a BRK on pre-TXM.
+ */
+static bool husk_ios_is_pre_txm(void)
+{
+    char ver[64];
+    size_t n = sizeof ver;
+    if (sysctlbyname("kern.osproductversion", ver, &n, NULL, 0) != 0) {
+        return true; /* fail closed: prefer legacy */
+    }
+    int major = 0;
+    (void)sscanf(ver, "%d", &major);
+    return major > 0 && major < 26;
 }
 
 /* Maximum verbosity by default: this path is nearly impossible to debug after the
@@ -291,7 +311,7 @@ size_t husk_ios_available_memory(void)
  * So: write a two-instruction function through the RW alias, then CALL it
  * through the RX alias. If JIT works at all, this returns 42.
  */
-static bool husk_jit_selftest(const HuskDualMapping *m)
+static bool husk_jit_selftest(const HuskDualMapping *m, bool allow_execute)
 {
     /* movz w0, #42  ;  ret */
     static const uint32_t kCode[2] = { 0x52800540u, 0xD65F03C0u };
@@ -320,6 +340,19 @@ static bool husk_jit_selftest(const HuskDualMapping *m)
     }
     HUSK_LOG("selftest: RX alias reflects RW writes (0x%08x 0x%08x) -- aliasing OK",
              readback[0], readback[1]);
+
+    /*
+     * Under TrollStore Open-with-JIT the process is traced by trollstorehelper.
+     * Calling into freshly minted RX pages during first-layout prewarm has been
+     * observed to fault; aliasing + vm_region executable is enough to claim the
+     * region. Defer in-process execute until allow_execute (post first frame /
+     * TXM StikDebug path).
+     */
+    if (!allow_execute) {
+        HUSK_LOG("selftest: PASS (alias-only; execute deferred -- safe under "
+                 "TrollStore Open-with-JIT / first-layout prewarm)");
+        return true;
+    }
 
     HUSK_LOG("selftest: CALLING generated code at %p ...", (void *)m->rx_addr);
     int (*fn)(void) = (int (*)(void))(void *)m->rx_addr;
@@ -415,22 +448,58 @@ HuskDualMapping husk_ios_jit_allocate(size_t bytes)
 
 static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes)
 {
-    HuskDualMapping region = husk_ios_jit_allocate_stikdebug(bytes);
+    HuskDualMapping region = { NULL, NULL, 0 };
+    const bool pre_txm = husk_ios_is_pre_txm();
+    const bool debugged = husk_cs_debugged();
+
+    /*
+     * Pre-TXM (iOS 15 TrollStore Open-with-JIT): CS_DEBUGGED is set by
+     * trollstorehelper. Emitting husk_brk_probe() under that live debugger is
+     * fatal EXC_BREAKPOINT / brk 105 -- SIGTRAP handlers never run. Always take
+     * the UTM-style legacy dual-map; never BRK.
+     */
+    if (pre_txm || debugged) {
+        HUSK_LOG("JIT backend select: legacy dual-map (pre_txm=%d CS_DEBUGGED=%d; "
+                 "skipping StikDebug BRK probe)",
+                 pre_txm ? 1 : 0, debugged ? 1 : 0);
+        region = husk_ios_jit_allocate_legacy(bytes);
+        if (region.rw_addr != NULL) {
+            HUSK_LOG("JIT backend selected: legacy PASS");
+            return region;
+        }
+        HUSK_LOG("JIT backend: legacy FAIL under CS_DEBUGGED/pre-TXM");
+        if (pre_txm) {
+            HUSK_LOG("no JIT backend produced executable memory (%zu bytes). On "
+                     "iOS 15, use TrollStore → Open with JIT so CS_DEBUGGED is "
+                     "set, then retry. Do not rely on apple-magnifier://enable-jit "
+                     "if it opens Magnifier/Helper without attaching.",
+                     bytes);
+            return region;
+        }
+        /* TXM + CS_DEBUGGED but legacy refused: fall through to StikDebug. */
+        HUSK_LOG("TXM device with CS_DEBUGGED: legacy unavailable; trying StikDebug");
+    }
+
+    HUSK_LOG("JIT backend select: StikDebug trap path");
+    region = husk_ios_jit_allocate_stikdebug(bytes);
     if (region.rw_addr != NULL) {
+        HUSK_LOG("JIT backend selected: StikDebug PASS");
         return region;
     }
 
-    HUSK_LOG("StikDebug path unavailable; trying legacy CS_DEBUGGED dual-map "
-             "(pre-TXM / TrollStore enable-jit)");
-    region = husk_ios_jit_allocate_legacy(bytes);
-    if (region.rw_addr != NULL) {
-        return region;
+    if (!pre_txm && !debugged) {
+        HUSK_LOG("StikDebug path unavailable; trying legacy CS_DEBUGGED dual-map");
+        region = husk_ios_jit_allocate_legacy(bytes);
+        if (region.rw_addr != NULL) {
+            HUSK_LOG("JIT backend selected: legacy PASS (fallback)");
+            return region;
+        }
     }
 
     HUSK_LOG("no JIT backend produced executable memory (%zu bytes). On iOS 15 "
-             "pre-TXM, enable JIT with TrollStore (Open with JIT / "
-             "apple-magnifier://enable-jit) so CS_DEBUGGED is set, then retry. "
-             "On TXM devices, attach StikDebug with the Universal JIT script.",
+             "pre-TXM, enable JIT with TrollStore Open with JIT so CS_DEBUGGED "
+             "is set, then retry. On TXM, attach StikDebug with the Universal "
+             "JIT script.",
              bytes);
     return region;
 }
@@ -540,7 +609,8 @@ static HuskDualMapping husk_ios_jit_allocate_legacy(size_t bytes)
                  region.size, (long long)(region.rx_addr - region.rw_addr));
         husk_ios_jit_log_footprint("after-legacy-jit-alloc");
 
-        if (!husk_jit_selftest(&region)) {
+        /* Alias-only: never execute under possible trollstorehelper trace. */
+        if (!husk_jit_selftest(&region, /*allow_execute=*/false)) {
             HUSK_LOG("legacy JIT %s: selftest FAILED; releasing", attempts[i].name);
             husk_ios_jit_release(&region);
             continue;
@@ -623,7 +693,7 @@ static HuskDualMapping husk_ios_jit_allocate_stikdebug(size_t bytes)
              region.size, (long long)(region.rx_addr - region.rw_addr));
     husk_ios_jit_log_footprint("after-jit-alloc");
 
-    if (!husk_jit_selftest(&region)) {
+    if (!husk_jit_selftest(&region, /*allow_execute=*/true)) {
         HUSK_LOG("#%llu: SELFTEST FAILED -- the region is not usable as JIT memory. "
                  "Refusing to hand it to TCG; QEMU would crash on its first "
                  "generated block instead of failing here.",
