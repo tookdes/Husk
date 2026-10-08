@@ -627,6 +627,8 @@ wanted = [
     "husk_snapshot_save",
     "husk_snapshot_load_at_startup",
     "husk_balloon_set_bytes",
+    "husk_vm_pause",
+    "husk_vm_resume",
     "husk_ios_jit_prewarm",
     "husk_ios_jit_install_trap_handler",
     "husk_ios_jit_is_available",

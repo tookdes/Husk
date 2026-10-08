@@ -106,6 +106,8 @@ static void (*p_husk_display_gl_set_metal_presenter)(husk_metal_present_fn);
 static bool (*p_husk_snapshot_load_at_startup)(void);
 static void (*p_husk_snapshot_save)(void (*)(bool, const char *));
 static void (*p_husk_balloon_set_bytes)(int64_t);
+static void (*p_husk_vm_pause)(void);
+static void (*p_husk_vm_resume)(void);
 
 static void load_qemu_once(void)
 {
@@ -174,6 +176,10 @@ static void load_qemu_once(void)
     RESOLVE(husk_snapshot_save);
     RESOLVE(husk_balloon_set_bytes);
 #undef RESOLVE
+    /* Optional: a libqemu without these simply cannot pause in the background.
+     * Plain dlsym, so a missing one does not overwrite g_err. */
+    p_husk_vm_pause  = (void (*)(void))dlsym(g_qemu, "husk_vm_pause");
+    p_husk_vm_resume = (void (*)(void))dlsym(g_qemu, "husk_vm_resume");
 }
 
 bool husk_ensure_qemu_loaded(void)
@@ -379,4 +385,14 @@ void husk_balloon_set_bytes(int64_t target_bytes)
 {
     if (!husk_ensure_qemu_loaded() || !p_husk_balloon_set_bytes) return;
     p_husk_balloon_set_bytes(target_bytes);
+}
+void husk_vm_pause(void)
+{
+    if (!husk_ensure_qemu_loaded() || !p_husk_vm_pause) return;
+    p_husk_vm_pause();
+}
+void husk_vm_resume(void)
+{
+    if (!husk_ensure_qemu_loaded() || !p_husk_vm_resume) return;
+    p_husk_vm_resume();
 }

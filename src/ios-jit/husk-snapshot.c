@@ -154,3 +154,64 @@ bool husk_snapshot_load_at_startup(void)
     load_snapshot_resume(RUN_STATE_RUNNING);
     return true;
 }
+
+/*
+ * Freeze the machine while iOS has the app in the background, and thaw it on
+ * the way back.
+ *
+ * iOS suspends a backgrounded app outright -- every thread, vCPUs included --
+ * but the clocks the guest reads keep moving. QEMU's virtual clock follows the
+ * host monotonic clock while the VM is in the running state, so on resume the
+ * guest sees its CPUs "stuck" for the whole time the iPad was locked: on an
+ * iPadOS 15.4.1 cold boot that was 726 s of soft-lockup splats, a workqueue
+ * lockup and Android's own watchdog timing out on threads that had simply not
+ * been scheduled. vm_stop() stops the virtual clock (cpu_disable_ticks), so a
+ * paused guest wakes up believing no time passed and carries on exactly where
+ * it was.
+ *
+ * Both run as bottom halves, like the snapshot save: they are called from the
+ * UI thread, and vm_stop()/vm_start() must run under the BQL on the main loop.
+ * A bottom half already holds the BQL, so neither takes it.
+ *
+ * Only a pause made here is undone here. A machine stopped for any other
+ * reason (a save in flight, a guest panic, an error) is left alone.
+ */
+static bool husk_paused_by_us;
+
+static void husk_pause_bh(void *opaque)
+{
+    if (!runstate_is_running()) {
+        fprintf(stderr, "[husk-snap] background pause: machine not running "
+                        "(state %s); leaving it alone\n",
+                RunState_str(runstate_get()));
+        return;
+    }
+    vm_stop(RUN_STATE_PAUSED);
+    husk_paused_by_us = true;
+    fprintf(stderr, "[husk-snap] background pause: vCPUs and guest clock stopped\n");
+}
+
+static void husk_resume_bh(void *opaque)
+{
+    if (!husk_paused_by_us) {
+        return;
+    }
+    husk_paused_by_us = false;
+    if (!runstate_check(RUN_STATE_PAUSED)) {
+        fprintf(stderr, "[husk-snap] foreground resume: state is %s, not paused; "
+                        "not touching it\n", RunState_str(runstate_get()));
+        return;
+    }
+    vm_start();
+    fprintf(stderr, "[husk-snap] foreground resume: machine running again\n");
+}
+
+void husk_vm_pause(void)
+{
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), husk_pause_bh, NULL);
+}
+
+void husk_vm_resume(void)
+{
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), husk_resume_bh, NULL);
+}

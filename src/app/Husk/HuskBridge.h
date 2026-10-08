@@ -104,6 +104,10 @@ void     husk_display_gl_set_metal_presenter(husk_metal_present_fn fn);
 bool husk_snapshot_load_at_startup(void);
 /* Save the running machine. Asynchronous; the vCPUs stop for the duration. */
 void husk_snapshot_save(void (*cb)(bool ok, const char *what));
+/* Stop/restart the vCPUs and guest clock around an iOS background suspension.
+ * Asynchronous; resume only undoes a pause made by husk_vm_pause(). */
+void husk_vm_pause(void);
+void husk_vm_resume(void);
 
 /* --- Husk's guest memory balloon --- */
 /* Ask the guest to shrink to, or grow back to, this much usable RAM. Safe from

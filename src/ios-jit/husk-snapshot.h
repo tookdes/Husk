@@ -20,4 +20,13 @@ void husk_snapshot_save(husk_snapshot_cb cb);
  */
 bool husk_snapshot_load_at_startup(void);
 
+/*
+ * Stop / restart the vCPUs and the guest's virtual clock around an iOS
+ * background suspension. Asynchronous (bottom halves on the main loop); safe to
+ * call from any thread once qemu_init() has returned. Resume only undoes a
+ * pause made by husk_vm_pause().
+ */
+void husk_vm_pause(void);
+void husk_vm_resume(void);
+
 #endif

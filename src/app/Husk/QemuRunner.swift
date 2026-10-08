@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import Foundation
 import os
+import UIKit
 
 /// Runs QEMU inside this process on a dedicated thread.
 ///
@@ -100,6 +101,11 @@ final class QemuRunner: ObservableObject {
         // of a cold boot, which looked like a hang. Both appear on console once system_server is up.
         ("sid=u:r:system_server:s0",      "Starting Android system services",    66),
         ("ctl.stop for 'idmap2d'",        "Loading system overlays",             72),
+        // Android's watchdog killing system_server takes zygote with it. On a
+        // slow cold boot that is expected and the boot carries on, but the bar
+        // cannot move and the old label made it read as a hang. Never raises
+        // the bar (58 is below where it will be); it only changes the words.
+        ("Service 'zygote' (pid",         "Android restarted its framework (normal on a slow first boot), still booting", 58),
         ("starting service 'bootanim'",   "Boot animation running",              65),
         ("Service 'bootanim' (pid",       "Compiling apps (this is the slow part)", 80),
         ("sys.boot_completed=1",          "Android is up",                       100),
@@ -183,12 +189,54 @@ final class QemuRunner: ObservableObject {
         UserDefaults.standard.object(forKey: "husk.soundDevice") as? Bool ?? true
     }
 
+    /// Set for a run where sound was asked for but the only machine that can be
+    /// restored was saved without it.
+    ///
+    /// On iPadOS 15 (iPad8,9, A12Z) a cold boot is not "one slow boot": the
+    /// framework is so slow under TCG that Android's own watchdog kills
+    /// system_server about five minutes in (logged at guest t=389s, zygote
+    /// SIGKILLed at 396s, the bar parked at 72%) and the boot starts its
+    /// framework over. The shipped snapshot restores the same machine in
+    /// seconds -- but it is a "sw" machine, and with sound on this run asked
+    /// for "sw+snd", which no restore can satisfy, so every launch cold-booted.
+    /// Sound is the one thing standing between the user and a working guest,
+    /// so on iOS 15 it waits; the log says so.
+    nonisolated(unsafe) static var soundHeldBackForRestore = false
+
+    /// Sound on the machine actually being built this run.
+    nonisolated static var machineSoundOn: Bool {
+        soundEnabled && !soundHeldBackForRestore
+    }
+
+    /// Decide `soundHeldBackForRestore`. Runs on the QEMU thread before the
+    /// command line is built, after probeGL() (the stamp depends on it).
+    nonisolated static func decideSoundForThisRun() {
+        soundHeldBackForRestore = false
+        guard soundEnabled else { return }
+        if #available(iOS 16, *) { return }
+        guard GuestImage.shared.hasShippedSnapshot || shared.hasSnapshot else { return }
+        let have = shared.snapshotDisplay ?? "sw"
+        let withSound = machineStamp
+        guard have != withSound else { return }   // a sound machine is saved: use it
+        soundHeldBackForRestore = true
+        if machineStamp == have {
+            HuskLog.log("qemu", "sound is on, but the saved machine (\(have)) has no sound "
+                              + "device; leaving sound OFF this run so it can be restored "
+                              + "instead of cold-booting Android, which on this iPad takes "
+                              + "longer than Android's own watchdog tolerates")
+        } else {
+            // The mismatch is about something else; holding sound back would
+            // cost sound and still not allow a restore.
+            soundHeldBackForRestore = false
+        }
+    }
+
     /// What the saved machine's hardware looks like, for deciding whether a
     /// restore is even possible. Was just the display; sound joins it because
     /// it changes the same thing.
     nonisolated static var machineStamp: String {
         (glProven ? "gl" : "sw")
-            + (soundEnabled ? "+snd" : "")
+            + (machineSoundOn ? "+snd" : "")
             + (landscapeGuest ? "+land" : "")
             + (customResolution.map { "+\($0.w)x\($0.h)" } ?? "")
     }
@@ -205,6 +253,85 @@ final class QemuRunner: ObservableObject {
     }
 
     nonisolated(unsafe) static var qemuReady = false
+
+    // MARK: iOS suspension
+
+    /// Keep the iPad from auto-locking while Android boots.
+    ///
+    /// A cold boot here runs many minutes with nothing to touch, so auto-lock
+    /// fires part-way through and iOS suspends the whole process -- vCPUs
+    /// included. The 0.8.6 log shows exactly that: the host log stops at
+    /// t+498s and resumes at t+1278s. Released once Android reports
+    /// boot_completed, or straight away when a saved machine was restored.
+    nonisolated static func holdScreenAwakeForBoot(_ on: Bool) {
+        Task { @MainActor in
+            UIApplication.shared.isIdleTimerDisabled = on
+            HuskLog.log("qemu", on ? "keeping the screen awake while Android boots"
+                                   : "boot is over; auto-lock allowed again")
+        }
+    }
+
+    private var lifecycleObservers: [NSObjectProtocol] = []
+    private var pausedForBackground = false
+    private var pauseTask: UIBackgroundTaskIdentifier = .invalid
+
+    /// Pause the guest while iOS has the app in the background.
+    ///
+    /// Suspension freezes every thread but not the clocks the guest reads, so
+    /// a guest that is merely suspended wakes up to a time jump: in 0.8.6 that
+    /// was "soft lockup - CPU#3 stuck for 726s", a 778 s workqueue lockup, and
+    /// Android's watchdog firing on threads that had never been scheduled.
+    /// vm_stop() stops the guest clock too, so a paused guest resumes as if
+    /// nothing happened.
+    private func installLifecycleHandlers() {
+        guard lifecycleObservers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        lifecycleObservers.append(nc.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil, queue: .main) { _ in
+                Task { @MainActor in QemuRunner.shared.pauseForBackground() }
+            })
+        lifecycleObservers.append(nc.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main) { _ in
+                Task { @MainActor in QemuRunner.shared.resumeFromBackground() }
+            })
+    }
+
+    @MainActor private func pauseForBackground() {
+        guard isRunning, QemuRunner.qemuReady, !pausedForBackground else { return }
+        if isSavingState {
+            HuskLog.log("qemu", "went to the background mid-save; not pausing the guest")
+            return
+        }
+        // A few seconds of grace so the pause actually lands before iOS
+        // freezes the process; it takes milliseconds.
+        pauseTask = UIApplication.shared.beginBackgroundTask(withName: "Husk pause") {
+            Task { @MainActor in QemuRunner.shared.endPauseTask() }
+        }
+        husk_vm_pause()
+        pausedForBackground = true
+        HuskLog.log("qemu", "app went to the background: pausing the guest so its "
+                          + "clock does not jump while iOS has it suspended")
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            QemuRunner.shared.endPauseTask()
+        }
+    }
+
+    @MainActor private func endPauseTask() {
+        guard pauseTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(pauseTask)
+        pauseTask = .invalid
+    }
+
+    @MainActor private func resumeFromBackground() {
+        guard pausedForBackground else { return }
+        pausedForBackground = false
+        endPauseTask()
+        husk_vm_resume()
+        HuskLog.log("qemu", "back in the foreground: guest resumed")
+    }
     /// A display size asked for before QEMU was up, applied once it is.
     nonisolated(unsafe) static var pendingUISize: (w: Int, h: Int)?
 
@@ -1178,13 +1305,13 @@ final class QemuRunner: ObservableObject {
             // Entropy. Without it the guest stalls waiting for crng init, which
             // on a previous guest cost several seconds of boot.
             "-device", "virtio-rng-pci",
-        ] + (QemuRunner.soundEnabled ? [
+        ] + (QemuRunner.machineSoundOn ? [
             // virtio-snd rather than intel-hda: a paravirtual device with no
             // codec to emulate, so the cost is a queue rather than a chip.
             // Conditional, because adding it changes the machine definition and
             // no snapshot taken without it can be restored into it.
             "-audiodev", "husk,id=huskaudio",
-        ] : []) + (QemuRunner.soundEnabled && QemuRunner.soundDeviceEnabled ? [
+        ] : []) + (QemuRunner.machineSoundOn && QemuRunner.soundDeviceEnabled ? [
             "-device", "virtio-sound-pci,audiodev=huskaudio",
         ] : []) + [
             "-chardev", "file,id=ser0,path=\(guestSerialLogPath)",
@@ -1229,6 +1356,8 @@ final class QemuRunner: ObservableObject {
         isRunning = true
         startedAt = Date()
         QemuRunner.bootStarted = Date()
+        QemuRunner.holdScreenAwakeForBoot(true)
+        installLifecycleHandlers()
 
         let t = Thread { [weak self] in self?.run() }
         t.name = "husk.qemu"
@@ -1348,6 +1477,7 @@ final class QemuRunner: ObservableObject {
 
     private func run() {
         probeGL()
+        QemuRunner.decideSoundForThisRun()
         let args = (profile == .phase0Alpine) ? phase0Arguments() : phase1Arguments()
         HuskLog.log("qemu", "profile: \(profile.rawValue)")
         HuskLog.log("qemu", "DISPLAY MODE: "
@@ -1490,6 +1620,7 @@ final class QemuRunner: ObservableObject {
             ? "restored a saved machine -- Android is already booted"
             : "no saved machine; booting Android from cold")
         QemuRunner.didRestore = restored
+        if restored { QemuRunner.holdScreenAwakeForBoot(false) }
         DispatchQueue.main.async { QemuRunner.shared.restoredFromSnapshot = restored }
         if restored && QemuRunner.glProven {
             // A GL snapshot was necessarily taken with the compositor stopped,
@@ -1800,6 +1931,7 @@ final class QemuRunner: ObservableObject {
                     if QemuRunner.bootCompletedAt == nil,
                        line.contains("sys.boot_completed=1") {
                         QemuRunner.bootCompletedAt = Date()
+                        QemuRunner.holdScreenAwakeForBoot(false)
                         HuskLog.log("snap", "Android reports boot_completed; "
                                           + "will save the machine once it settles")
                     }
