@@ -8,6 +8,7 @@
 #
 # Usage: ./scripts/build_ios.sh [stage ...]      (no args = all stages)
 #        stages: libffi glib pixman libucontext libslirp qemu
+# iOS 15 port: prefer Xcode 16 SDK (see scripts/ci_build.sh). Cache-bust for xcode16 rebuild.
 set -uo pipefail
 
 HUSK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

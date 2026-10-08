@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-import BackgroundTasks
 import dnssd
 import Foundation
 import SwiftUI
@@ -18,12 +17,10 @@ import UserNotifications
 /// entitlement) and stores the resulting RPPairing file where Built-in StikJIT
 /// reads it.
 ///
-/// The user pairs from Settings, so Husk has to keep running in the background:
-/// a BGContinuedProcessingTask ("<bundle id>.pairing.session", permitted by
-/// `$(PRODUCT_BUNDLE_IDENTIFIER).pairing.*` in Info.plist) whose system progress
-/// UI also shows the PIN. When iOS refuses it (a re-signed bundle whose
-/// identifier no longer matches), only the short background grace period
-/// remains, and the walkthrough says so. The PIN is also sent as a notification.
+/// The user pairs from Settings, so Husk has to keep running in the background.
+/// This iOS 15 TrollStore port cannot use BGContinuedProcessingTask (iOS 26+),
+/// so only the short UIApplication background grace period remains and the
+/// walkthrough says so. The PIN is also sent as a notification.
 ///
 /// Log category "jit-pairing": states only, never the PIN, device name or identifiers.
 @MainActor final class OnDevicePairing: ObservableObject {
@@ -66,8 +63,6 @@ import UserNotifications
 
     private var session: OpaquePointer?
     private var registration: DNSServiceRef?
-    private var continued: AnyObject?            // BGContinuedProcessingTask (iOS 26+)
-    private var registered: String?
     private var grace: UIBackgroundTaskIdentifier = .invalid
     private var deadline: Timer?
 
@@ -138,10 +133,6 @@ import UserNotifications
         guard active else { return }
         phase = .pin(pin)
         log("code shown")
-        if #available(iOS 26.0, *), let task = continued as? BGContinuedProcessingTask {
-            task.updateTitle("Pairing code \(pin)", subtitle: "Enter it on this \(Self.deviceKind) to pair with Husk")
-            task.progress.completedUnitCount = 1
-        }
         if UIApplication.shared.applicationState != .active {
             notify("Husk pairing code: \(pin)", body: "Enter this code on your \(Self.deviceKind) to finish pairing.")
         }
@@ -233,74 +224,23 @@ import UserNotifications
 
     // MARK: Background
 
-    /// The permitted "<bundle id>.pairing.*" identifier from Info.plist, made concrete.
-    private var taskIdentifier: String? {
-        let permitted = Bundle.main.object(forInfoDictionaryKey: "BGTaskSchedulerPermittedIdentifiers") as? [String] ?? []
-        guard let wildcard = permitted.first(where: { $0.hasSuffix(".pairing.*") }) else { return nil }
-        return String(wildcard.dropLast()) + "session"
-    }
-
     private func beginBackground() {
         grace = UIApplication.shared.beginBackgroundTask(withName: "Husk pairing") {
             Task { @MainActor in
                 let pairing = OnDevicePairing.shared
-                if pairing.continued == nil && pairing.active {
+                if pairing.active {
                     pairing.cancel(reason: "iOS stopped Husk in the background before pairing finished. "
                                          + "Try again, and pair from Settings straight away.")
                 }
                 pairing.endGrace()
             }
         }
-        if #available(iOS 26.0, *) { submitContinued() } else { backgroundLimited = true }
-    }
-
-    @available(iOS 26.0, *)
-    private func submitContinued() {
-        guard let identifier = taskIdentifier else { backgroundLimited = true; return }
-        if registered != identifier {
-            let ok = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { task in
-                guard let task = task as? BGContinuedProcessingTask else { task.setTaskCompleted(success: false); return }
-                Task { @MainActor in OnDevicePairing.shared.attach(task) }
-            }
-            guard ok else { log("register refused"); backgroundLimited = true; return }
-            registered = identifier
-        }
-        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: "Pairing with Husk",
-                                                       subtitle: "Settings › Privacy & Security › Developer Mode")
-        request.strategy = .fail
-        do {
-            try BGTaskScheduler.shared.submit(request)
-            log("continued-processing submitted")
-        } catch {
-            log("continued-processing refused")
-            backgroundLimited = true
-        }
-    }
-
-    @available(iOS 26.0, *)
-    private func attach(_ task: BGContinuedProcessingTask) {
-        guard active else { task.setTaskCompleted(success: false); return }
-        continued = task
-        task.progress.totalUnitCount = 2
-        if case .pin(let pin) = phase {
-            task.updateTitle("Pairing code \(pin)", subtitle: "Enter it on this \(Self.deviceKind) to pair with Husk")
-            task.progress.completedUnitCount = 1
-        }
-        task.expirationHandler = {
-            DispatchQueue.main.async {
-                OnDevicePairing.shared.continued = nil
-                OnDevicePairing.shared.cancel(reason: "iOS stopped the pairing in the background. Try again.")
-            }
-        }
-        log("continued-processing running")
+        // iOS 15 port: no BGContinuedProcessingTask in the Xcode 16 / iOS 18 SDK.
+        backgroundLimited = true
     }
 
     private func endBackground(success: Bool) {
-        if #available(iOS 26.0, *), let task = continued as? BGContinuedProcessingTask {
-            task.progress.completedUnitCount = task.progress.totalUnitCount
-            task.setTaskCompleted(success: success)
-        }
-        continued = nil
+        _ = success
         endGrace()
     }
 
