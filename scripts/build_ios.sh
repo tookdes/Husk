@@ -153,10 +153,38 @@ apply_patch() {
 
 # ---------------------------------------------------------------- stages
 stage_libffi()      { build_autotools libffi-3.5.0; }
-stage_glib()        { build_meson glib-2.83.0 "$CROSS_IOS" \
-                        -Dtests=false -Dnls=disabled -Dintrospection=disabled \
-                        -Dselinux=disabled -Dlibmount=disabled -Ddtrace=disabled \
-                        -Dman-pages=disabled -Dglib_debug=disabled -Dxattr=false; }
+# GLib's meson check sees pipe2 in the iOS 18 SDK headers and sets HAVE_PIPE2.
+# iOS 15.4.1's libSystem has no pipe2, so those calls are weak-NULL. The old
+# fishhook constructor that patched them vm_protect'd __DATA_CONST and AMFI
+# SIGKILL'd the process at launch (black flash, no Analytics .ips). Build GLib
+# without pipe2 so QEMU never references it.
+stage_glib() {
+    local name="glib-2.83.0"
+    local dir="$SRC/$name"
+    local log="$LOGS/$name.log"
+    local stamp="glib-2.83.0-nopipe2"
+    done_stage "$stamp" && { echo "[skip] $name ($stamp)"; return 0; }
+    banner "building $name (meson, HAVE_PIPE2 forced off)"
+    rm -rf "$dir/_husk_build"
+    (
+      cd "$dir"
+      meson setup _husk_build --cross-file "$CROSS_IOS" --prefix="$PREFIX" \
+            --buildtype=release --default-library=static \
+            -Dtests=false -Dnls=disabled -Dintrospection=disabled \
+            -Dselinux=disabled -Dlibmount=disabled -Ddtrace=disabled \
+            -Dman-pages=disabled -Dglib_debug=disabled -Dxattr=false
+      find _husk_build -name config.h -exec sed -i '' 's/#define HAVE_PIPE2 1/#define HAVE_PIPE2 0/' {} +
+      if grep -R --include='config.h' -q 'HAVE_PIPE2 1' _husk_build; then
+        echo "HAVE_PIPE2 still enabled after sed" >&2
+        exit 1
+      fi
+      meson compile -C _husk_build -j "$NCPU"
+      meson install -C _husk_build
+    ) > "$log" 2>&1 || fail "$name" "$log"
+    # Static glib is linked into libqemu; force a full qemu rebuild next.
+    rm -f "$STAMPS/qemu"
+    mark_stage "$stamp"
+}
 stage_pixman()      { apply_patch pixman-0.38.0 pixman-0.38.0.patch
                       build_autotools pixman-0.38.0 --disable-gtk --disable-libpng --disable-arm-iwmmxt; }
 stage_libucontext() { build_meson libucontext "$CROSS_IOS" -Dfreestanding=true; }

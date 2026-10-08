@@ -50,8 +50,8 @@ bool husk_ios_jit_is_available(void);
 bool husk_ios_jit_mapjit_works(void);
 void husk_ios_jit_detach(void);
 
-/* pipe2 fishhook for GLib/QEMU on iOS < 18. Call AFTER HuskLog.start(); never
- * from a dyld constructor (vm_protect on __DATA_CONST can SIGKILL on iOS 15). */
+/* Historical no-op: pipe2 fishhook removed (AMFI SIGKILL on iOS 15). GLib is
+ * built with HAVE_PIPE2 forced off; PipeShim.c still exports pipe2(). */
 void husk_install_pipe2_shim(void);
 void husk_ios_jit_log_footprint(const char *tag);
 size_t husk_ios_available_memory(void);

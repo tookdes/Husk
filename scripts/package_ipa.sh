@@ -137,9 +137,13 @@ cp -R "$APP" "$STAGE/Payload/"
 
 # Ad hoc, inside out: loose dylibs and frameworks, then app extensions, then the
 # app with its entitlements (see the top of this file for why).
-ENT="$HUSK_ROOT/src/app/Husk/Husk.entitlements"
+ENT_SRC="$HUSK_ROOT/src/app/Husk/Husk.entitlements"
+# TrollStore's ldid re-reads entitlements from the binary. Keep the embedded
+# plist as a strict XML dict (no comments) so re-sign never chokes.
+ENT="$STAGE/Husk.entitlements.clean"
+plutil -convert xml1 -o "$ENT" "$ENT_SRC"
 SAPP="$STAGE/Payload/$(basename "$APP")"
-sign() { codesign --force --sign - --timestamp=none "$@"; }
+sign() { codesign --force --sign - --timestamp=none --generate-entitlement-der "$@"; }
 find "$SAPP" -name "*.dylib" -not -path "*/Frameworks/*.framework/*" | while read -r f; do sign "$f"; done
 for fw in "$SAPP"/Frameworks/*.framework; do [ -d "$fw" ] && sign "$fw"; done
 for ex in "$SAPP"/PlugIns/*.appex; do [ -d "$ex" ] && sign "$ex"; done

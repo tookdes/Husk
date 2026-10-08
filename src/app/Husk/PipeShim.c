@@ -1,51 +1,22 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <errno.h>
-#include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
-#include <mach-o/dyld.h>
-#include "fishhook.h"
 
 /*
- * Implementation of pipe2 for iOS systems where libc does not export it.
+ * pipe2 fallback for iOS < 18.
  *
- * In macOS 15 / iOS 18 SDKs, pipe2 was introduced. When GLib was compiled
- * against those headers, it detected HAVE_PIPE2 and emitted weak calls to
- * pipe2(). On iOS 16 and 17 devices, libSystem does not implement pipe2,
- * so the weak symbol resolves to NULL at runtime, causing g_unix_open_pipe()
- * to branch to 0x0 and crash with SIGSEGV (signal 11) inside qemu_init().
+ * Prefer rebuilding GLib with HAVE_PIPE2 forced off (see scripts/build_ios.sh):
+ * that removes the weak NULL calls entirely. This symbol remains exported so a
+ * stale libqemu that still weak-imports pipe2 can bind to us without fishhook.
  *
- * Using fishhook, we patch the GOT in our own images (the main binary and
- * libqemu-aarch64-softmmu.dylib) to point pipe2 to this implementation.
- *
- * IMPORTANT: do NOT run this from a dyld constructor. rebind_symbols() walks
- * every loaded image and vm_protect()s __DATA_CONST binding slots. On iOS 15
- * that can SIGKILL the process (AMFI) before main — no ReportCrash .ips, no
- * Documents/husk.log, just a black flash back to SpringBoard. Install the
- * shim from HuskApp.init after HuskLog.start() instead, and only touch our
- * own images.
+ * Do NOT fishhook / vm_protect __DATA_CONST here. On iPadOS 15.4.1 that AMFI
+ * SIGKILLs at launch: black flash, empty Documents, no Analytics .ips.
  */
-
-/* Runs before QEMU's default-priority constructors. If this file appears in
- * Documents but husk.log does not, the kill is still pre-main (likely a QEMU
- * static initializer). If neither appears, dyld died first. */
-__attribute__((constructor(50)))
-static void husk_ctor_breadcrumb(void)
-{
-    const char *home = getenv("HOME");
-    if (!home) return;
-    char path[768];
-    int n = snprintf(path, sizeof path, "%s/Documents/husk-ctor.txt", home);
-    if (n <= 0 || (size_t)n >= sizeof path) return;
-    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) return;
-    const char msg[] = "ctors-begin\n";
-    (void)write(fd, msg, sizeof msg - 1);
-    close(fd);
-}
 
 __attribute__((visibility("default")))
 int pipe2(int fds[2], int flags)
@@ -83,30 +54,32 @@ int pipe2(int fds[2], int flags)
     return 0;
 }
 
-static int image_is_ours(const char *name)
+/* Earliest app-image breadcrumb. Dependency dylibs (libqemu) run their
+ * constructors first; if Documents stays empty after install, dyld/AMFI died
+ * before this image's constructors. mkdir Documents: it does not exist yet
+ * at constructor time on a fresh container. */
+__attribute__((constructor(50)))
+static void husk_ctor_breadcrumb(void)
 {
-    if (!name) return 0;
-    /* Main executable ends with /Husk.app/Husk; qemu dylib is under Frameworks. */
-    if (strstr(name, "/Husk.app/Husk") != NULL) return 1;
-    if (strstr(name, "libqemu-aarch64-softmmu") != NULL) return 1;
-    return 0;
+    const char *home = getenv("HOME");
+    if (!home || !*home) return;
+    char doc[768];
+    int n = snprintf(doc, sizeof doc, "%s/Documents", home);
+    if (n <= 0 || (size_t)n >= sizeof doc) return;
+    (void)mkdir(doc, 0755);
+    char path[800];
+    n = snprintf(path, sizeof path, "%s/husk-ctor.txt", doc);
+    if (n <= 0 || (size_t)n >= sizeof path) return;
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) return;
+    const char msg[] = "ctors-app-begin\n";
+    (void)write(fd, msg, sizeof msg - 1);
+    close(fd);
 }
 
+/* Kept for ABI with HuskBridge.h; no-op now that fishhook is gone. */
 __attribute__((visibility("default")))
 void husk_install_pipe2_shim(void)
 {
-    struct rebinding rebindings[] = {
-        {"pipe2", (void *)pipe2, NULL}
-    };
-    uint32_t count = _dyld_image_count();
-    uint32_t touched = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (!image_is_ours(name)) continue;
-        rebind_symbols_image((void *)(uintptr_t)_dyld_get_image_header(i),
-                             _dyld_get_image_vmaddr_slide(i),
-                             rebindings, 1);
-        touched++;
-    }
-    fprintf(stderr, "[pipe2-shim] rebind installed on %u own image(s)\n", touched);
+    /* no-op: GLib is built without pipe2; fishhook removed (AMFI SIGKILL). */
 }

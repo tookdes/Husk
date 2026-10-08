@@ -31,6 +31,32 @@
 #include <sys/ucontext.h>   /* not <ucontext.h>: that one #errors without _XOPEN_SOURCE */
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+
+/* Runs during libqemu image constructors (before the app image). mkdir
+ * Documents — it does not exist yet in a fresh container. If this file
+ * appears but husk-ctor.txt does not, the kill is between qemu and app
+ * ctors. If neither appears, dyld/AMFI died first. */
+__attribute__((constructor(101)))
+static void husk_qemu_ctor_breadcrumb(void)
+{
+    const char *home = getenv("HOME");
+    if (!home || !*home) return;
+    char doc[768];
+    int n = snprintf(doc, sizeof doc, "%s/Documents", home);
+    if (n <= 0 || (size_t)n >= sizeof doc) return;
+    (void)mkdir(doc, 0755);
+    char path[800];
+    n = snprintf(path, sizeof path, "%s/husk-qemu-ctor.txt", doc);
+    if (n <= 0 || (size_t)n >= sizeof path) return;
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) return;
+    const char msg[] = "ctors-qemu-begin\n";
+    (void)write(fd, msg, sizeof msg - 1);
+    close(fd);
+}
+
 
 /*
  * Provide pipe2 for iOS systems where libc does not export it.
