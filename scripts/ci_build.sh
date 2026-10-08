@@ -59,6 +59,15 @@ PKG_CONFIG_LIBDIR="$HUSK_ROOT/build/ios-arm64/sysroot/lib/pkgconfig:$HUSK_ROOT/b
     SDKMINVER="${SDKMINVER:-15.0}" ./scripts/build_gpu_ios.sh
 
 step "QEMU"
+# The CI cache restores a QEMU tree that integrate_husk.sh already wired up
+# in an earlier run, so the first QEMU build below compiles whatever Husk
+# sources that tree holds. The GL stub is listed unconditionally in
+# ui/meson.build; an old copy of it (from the --disable-opengl days) has no
+# CONFIG_OPENGL guard and collides with husk-display-gl.c at link time. Refresh
+# it before building; everything else is refreshed by integrate_husk.sh below.
+if [ -d third_party/build/qemu-10.0.12-utm/ui ]; then
+    cp src/ios-jit/husk-display-gl-stub.c third_party/build/qemu-10.0.12-utm/ui/
+fi
 ./scripts/build_ios.sh qemu
 
 step "integrate Husk sources into QEMU, then rebuild it"
