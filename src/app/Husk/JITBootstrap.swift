@@ -240,15 +240,16 @@ enum JITBootstrap {
     }
 
     /// A debugger is only one way to obtain executable memory. On pre-TXM
-    /// systems (including the iOS 15 TrollStore target) dynamic-codesigning can
-    /// make MAP_JIT executable without a debugger attachment.
+    /// systems (including the iOS 15 TrollStore target) get-task-allow +
+    /// TrollStore `apple-magnifier://enable-jit` (or a jailbreak) can make
+    /// MAP_JIT executable. `dynamic-codesigning` is intentionally NOT embedded:
+    /// iOS 15 on A12+ bans it and AMFI SIGKILLs at launch (TrollStore README).
     static var canExecuteJITCode: Bool {
         if isDebuggerAttached { return true }
         guard canGrantOwnJIT else { return false }
-        // TrollStore keeps dynamic-codesigning; jailbreaks that allow JIT mark
-        // the process debugged at launch. Both are enough on pre-TXM iOS without
-        // waiting on the MAP_JIT soft probe -- and without ever running an
-        // execute self-test from SwiftUI bring-up.
+        // TrollStore install + get-task-allow, or a jailbreak that marks the
+        // process debugged at launch. Enough on pre-TXM without the MAP_JIT
+        // soft probe during SwiftUI bring-up.
         if isInstalledWithTrollStore || isJailbroken || debuggedAtLaunch {
             return true
         }

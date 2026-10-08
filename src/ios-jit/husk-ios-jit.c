@@ -34,27 +34,39 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
-/* Runs during libqemu image constructors (before the app image). mkdir
- * Documents — it does not exist yet in a fresh container. If this file
- * appears but husk-ctor.txt does not, the kill is between qemu and app
- * ctors. If neither appears, dyld/AMFI died first. */
-__attribute__((constructor(101)))
-static void husk_qemu_ctor_breadcrumb(void)
+/* Runs when libqemu is dlopened (no longer at process start). mkdir
+ * Documents — it does not exist yet in a fresh container. */
+static void husk_qemu_write_marker(const char *dir, const char *file, const char *msg)
 {
-    const char *home = getenv("HOME");
-    if (!home || !*home) return;
-    char doc[768];
-    int n = snprintf(doc, sizeof doc, "%s/Documents", home);
-    if (n <= 0 || (size_t)n >= sizeof doc) return;
-    (void)mkdir(doc, 0755);
-    char path[800];
-    n = snprintf(path, sizeof path, "%s/husk-qemu-ctor.txt", doc);
+    (void)mkdir(dir, 0755);
+    char path[900];
+    int n = snprintf(path, sizeof path, "%s/%s", dir, file);
     if (n <= 0 || (size_t)n >= sizeof path) return;
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0) return;
-    const char msg[] = "ctors-qemu-begin\n";
-    (void)write(fd, msg, sizeof msg - 1);
+    (void)write(fd, msg, strlen(msg));
     close(fd);
+}
+
+__attribute__((constructor(101)))
+static void husk_qemu_ctor_breadcrumb(void)
+{
+    const char msg[] = "ctors-qemu-begin\n";
+    const char *home = getenv("HOME");
+    const char *cff = getenv("CFFIXED_USER_HOME");
+    const char *tmp = getenv("TMPDIR");
+    char doc[768];
+    if (home && *home) {
+        snprintf(doc, sizeof doc, "%s/Documents", home);
+        husk_qemu_write_marker(doc, "husk-qemu-ctor.txt", msg);
+    }
+    if (cff && *cff) {
+        snprintf(doc, sizeof doc, "%s/Documents", cff);
+        husk_qemu_write_marker(doc, "husk-qemu-ctor.txt", msg);
+    }
+    if (tmp && *tmp) {
+        husk_qemu_write_marker(tmp, "husk-qemu-ctor.txt", msg);
+    }
 }
 
 

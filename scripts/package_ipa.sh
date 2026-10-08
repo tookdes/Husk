@@ -6,8 +6,12 @@
 # anyway, because TrollStore keeps the entitlements a binary already carries
 # (RootHelper's signApp reads them from the binary) and invents only
 # get-task-allow for one that has none. Signed this way, the same file gets the
-# memory and dynamic-codesigning entitlements under TrollStore, and a sideloader
-# simply replaces the signature.
+# memory entitlements under TrollStore, and a sideloader simply replaces the
+# signature.
+#
+# Do NOT embed dynamic-codesigning: on iOS 15 A12+ AMFI bans it and SIGKILLs at
+# launch (TrollStore README "Banned entitlements"). JIT uses get-task-allow +
+# apple-magnifier://enable-jit instead.
 #
 # The validation step exists because a bundle missing CFBundleIdentifier or
 # CFBundleExecutable builds and zips perfectly happily, and then fails to install
@@ -126,7 +130,8 @@ for f in vmlinuz-virt initramfs-virt husk-jit.js \
 done
 
 # Legacy TrollStore builds intentionally omit the iOS 26 StikJIT helper.
-# JIT comes from dynamic-codesigning/MAP_JIT on supported pre-TXM systems.
+# JIT on iOS 15: get-task-allow + TrollStore enable-jit / MAP_JIT on pre-TXM.
+# dynamic-codesigning is intentionally absent (banned on A12+ iOS 15).
 
 [ $rc -eq 0 ] || { echo "==> bundle is not installable; refusing to package" >&2; exit 1; }
 
@@ -149,8 +154,14 @@ for fw in "$SAPP"/Frameworks/*.framework; do [ -d "$fw" ] && sign "$fw"; done
 for ex in "$SAPP"/PlugIns/*.appex; do [ -d "$ex" ] && sign "$ex"; done
 sign --entitlements "$ENT" "$SAPP"
 echo "==> entitlements in the signed app:"
-codesign -d --entitlements - "$SAPP" 2>/dev/null | grep -E "get-task-allow|dynamic-codesigning|increased-memory|extended-virtual" \
+codesign -d --entitlements - "$SAPP" 2>/dev/null | grep -E "get-task-allow|increased-memory|extended-virtual" \
     || { echo "==> entitlements did not embed; refusing to package" >&2; rm -rf "$STAGE"; exit 1; }
+# Guard: never ship the A12+ iOS 15 banned entitlement again.
+if codesign -d --entitlements - "$SAPP" 2>/dev/null | grep -q "dynamic-codesigning"; then
+    echo "==> REFUSING: dynamic-codesigning is banned on iOS 15 A12+ (silent SIGKILL)" >&2
+    rm -rf "$STAGE"
+    exit 1
+fi
 TMP_IPA="$STAGE/Husk.ipa"
 ( cd "$STAGE" && zip -qry "$TMP_IPA" Payload )
 

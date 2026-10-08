@@ -98,9 +98,13 @@ targets:
           - "-lhusk_rppairing"
     dependencies:
       # Built by scripts/build_ios.sh. Embedded and signed into the bundle.
+      # Embed only — do NOT LC_LOAD_DYLIB at process start. HuskQemuLazy.c
+      # dlopens after the first SwiftUI frame so ~809 qemu constructors cannot
+      # AMFI-SIGKILL before Documents breadcrumbs exist (iPadOS 15.4.1).
       - framework: ../../build/ios-arm64/lib/libqemu-aarch64-softmmu.dylib
         embed: true
         codeSign: true
+        link: false
     preBuildScripts:
       - name: Stage guest image
         # The Phase 0 guest is far too large for git, so it is fetched rather than

@@ -48,4 +48,19 @@ if otool -L "$BIN" | grep -E 'SwiftUICore|SwiftData\.framework|Observation\.fram
     echo "Binary links a framework absent on iOS 15" >&2
     exit 1
 fi
+
+echo "==> must NOT LC_LOAD_DYLIB libqemu at process start (lazy dlopen)"
+if otool -L "$BIN" | grep -F 'libqemu-aarch64-softmmu.dylib'; then
+    echo "Husk still links libqemu at load time; constructors run pre-UI" >&2
+    exit 1
+fi
+echo "libqemu not in LC_LOAD_DYLIB (good; HuskQemuLazy dlopens later)"
+
+echo "==> must NOT embed banned dynamic-codesigning entitlement"
+if codesign -d --entitlements - "$BIN" 2>/dev/null | grep -q 'dynamic-codesigning'; then
+    echo "dynamic-codesigning present; iOS 15 A12+ AMFI SIGKILLs at launch" >&2
+    exit 1
+fi
+echo "dynamic-codesigning absent (good)"
+
 echo "==> iOS 15 ABI checks passed"

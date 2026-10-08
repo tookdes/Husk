@@ -25,6 +25,11 @@ typedef struct HuskFrameInfo {
     uint64_t sequence;
 } HuskFrameInfo;
 
+/* Lazy loader: libqemu is embedded but not linked. Call before guest start;
+ * wrappers also auto-load on first use. */
+bool husk_ensure_qemu_loaded(void);
+const char *husk_qemu_load_error(void);
+
 /* --- QEMU's own public API (system/qemu.symbols) --- */
 void qemu_init(int argc, char **argv);
 void qemu_main_loop(void);

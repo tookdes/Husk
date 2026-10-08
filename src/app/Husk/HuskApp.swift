@@ -48,15 +48,12 @@ struct HuskApp: App {
         // pipe2 fishhook removed: it vm_protect'd __DATA_CONST and AMFI
         // SIGKILL'd on iPadOS 15.4.1. GLib is built without HAVE_PIPE2.
         husk_install_pipe2_shim()
-        HuskLog.log("boot", "app init after HuskLog.start")
-        HuskLog.logFootprint("app-launch")
+        HuskLog.log("boot", "app init after HuskLog.start (qemu NOT loaded yet)")
+        // Do NOT call husk_ios_jit_* / logFootprint here: those live in libqemu,
+        // which is dlopened only after the first SwiftUI frame (see onAppear).
         // Before anything asks a debugger for anything: was this process already marked as debugged (a jailbreak that allows JIT in apps)?
         JITBootstrap.noteLaunchState()
         HuskLog.log("jit", "debugged at launch: \(JITBootstrap.debuggedAtLaunch); TrollStore install: \(JITBootstrap.isInstalledWithTrollStore); jailbreak: \(JITBootstrap.isJailbroken); can grant its own JIT: \(JITBootstrap.canGrantOwnJIT)")
-
-        // Then the trap guard: without it, any brk we issue when StikDebug is
-        // absent kills the process outright rather than returning an error.
-        JITBootstrap.installTrapGuard()
 
         // Game controllers, for the games the native runtime runs.
         Task { @MainActor in HuskGamepads.shared.start() }
@@ -65,6 +62,37 @@ struct HuskApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onAppear {
+                    Self.loadQemuAfterUI()
+                }
+        }
+    }
+
+    /// Highest-leverage launch fix for iPadOS 15.4.1: prove UI survives before
+    /// running ~809 libqemu constructors + MAP_JIT/vm_protect paths.
+    private static var didLoadQemu = false
+    private static func loadQemuAfterUI() {
+        guard !didLoadQemu else { return }
+        didLoadQemu = true
+        HuskLog.log("boot", "UI appeared; writing pre-dlopen marker then loading libqemu")
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        if let docs {
+            try? "ui-appeared-before-dlopen\n".write(to: docs.appendingPathComponent("husk-ui-appear.txt"),
+                                                    atomically: true, encoding: .utf8)
+        }
+        let ok = husk_ensure_qemu_loaded()
+        if ok {
+            HuskLog.log("boot", "libqemu dlopen OK; installing trap guard")
+            JITBootstrap.installTrapGuard()
+            HuskLog.logFootprint("after-qemu-dlopen")
+        } else {
+            let errPtr = husk_qemu_load_error()
+            let err = errPtr != nil ? String(cString: errPtr!) : "unknown"
+            HuskLog.log("boot", "libqemu dlopen FAILED: \(err)")
+            if let docs {
+                try? "dlopen-failed: \(err)\n".write(to: docs.appendingPathComponent("husk-qemu-dlopen-fail.txt"),
+                                                     atomically: true, encoding: .utf8)
+            }
         }
     }
 }
