@@ -33,6 +33,17 @@ fetch () {
     ( cd "$GPU/$dir" && git checkout -q "$commit" )
 }
 
+# virglrenderer's gallium meson.build runs a code generator that needs PyYAML
+# (find_program('python3', modules: ['yaml'])). Homebrew's python3 on the
+# macOS runners does not ship it, and is PEP 668 "externally managed".
+if ! python3 -c 'import yaml' 2>/dev/null; then
+    echo "==> installing PyYAML for virglrenderer's code generators"
+    python3 -m pip install --quiet --break-system-packages pyyaml 2>/dev/null \
+      || python3 -m pip install --quiet --user --break-system-packages pyyaml 2>/dev/null \
+      || python3 -m pip install --quiet --user pyyaml
+    python3 -c 'import yaml' || { echo "PyYAML still missing for $(command -v python3)" >&2; exit 1; }
+fi
+
 fetch epoxy https://github.com/utmapp/libepoxy.git   "$EPOXY_COMMIT"
 fetch virgl https://github.com/utmapp/virglrenderer.git "$VIRGL_COMMIT"
 
