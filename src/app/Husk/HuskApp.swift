@@ -45,6 +45,11 @@ struct HuskApp: App {
         // this point is lost -- and the JIT path is exactly what we cannot afford
         // to lose the first line of.
         HuskLog.start()
+        // After logging: fishhook pipe2 into our own images only. Must not run
+        // from a dyld constructor — that SIGKILL'd launch on iPadOS 15.4.1
+        // (black flash, no Analytics .ips, empty Documents).
+        husk_install_pipe2_shim()
+        HuskLog.log("boot", "pipe2 shim installed")
         HuskLog.logFootprint("app-launch")
         // Before anything asks a debugger for anything: was this process already marked as debugged (a jailbreak that allows JIT in apps)?
         JITBootstrap.noteLaunchState()
