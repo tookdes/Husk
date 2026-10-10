@@ -94,6 +94,8 @@ targets:
           # Security verifies the licence signature Minecraft's UI engine checks through Java's Signature class.
           - "-framework"
           - "Security"
+          # libresolv: the phone's DNS servers, for games that resolve names themselves (Geode's c-ares).
+          - "-lresolv"
           # On-device pairing for Built-in StikJIT, built by scripts/build_rppairing_ios.sh.
           - "-lhusk_rppairing"
     dependencies:

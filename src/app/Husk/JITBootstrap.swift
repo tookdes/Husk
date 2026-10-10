@@ -71,6 +71,10 @@ enum JITBootstrap {
     /// not work. So claim it first and hold it.
     @discardableResult
     static func prewarm() -> Bool {
+        if prewarmed { return true }
+        // iOS 15 port: only with CS_DEBUGGED set (TrollStore "Open with JIT"). Upstream's
+        // self-grant without a debugger relies on dynamic-codesigning, which this build
+        // cannot carry (A12+ iOS 15 SIGKILLs it), so it is not attempted here.
         guard isDebuggerAttached else {
             HuskLog.log("jit", "no debugger attached yet; not prewarming")
             return false
@@ -134,6 +138,13 @@ enum JITBootstrap {
     static var keepDebuggerAttached: Bool {
         get { UserDefaults.standard.bool(forKey: "husk.keepDebuggerAttached") }
         set { UserDefaults.standard.set(newValue, forKey: "husk.keepDebuggerAttached") }
+    }
+
+    /// Whether Husk has JIT now (upstream 1.1's name for the gate the UI checks). On this iOS 15
+    /// branch it never tries to make a region by itself: it is CS_DEBUGGED from TrollStore's
+    /// Open with JIT, or a region that is already held.
+    static var ready: Bool {
+        prewarmed || isLive || canExecuteJITCode
     }
 
     /// True once this process has told StikDebug to let go.

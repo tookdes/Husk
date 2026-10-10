@@ -54,6 +54,7 @@ bool husk_ios_jit_is_available(void);
  * (plain RX and/or MAP_JIT). Cache keyed on CS_DEBUGGED. */
 bool husk_ios_jit_mapjit_works(void);
 void husk_ios_jit_invalidate_probe_cache(void);
+const char *husk_ios_jit_self_route(void);
 void husk_ios_jit_detach(void);
 
 /* Historical no-op: pipe2 fishhook removed (AMFI SIGKILL on iOS 15). GLib is

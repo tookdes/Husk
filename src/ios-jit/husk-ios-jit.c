@@ -368,6 +368,7 @@ static bool husk_jit_selftest(const HuskDualMapping *m, bool allow_execute)
     return true;
 }
 
+
 /* ------------------------------------------------------------- allocation */
 
 static bool husk_page_is_executable(void *p);
@@ -393,6 +394,12 @@ static HuskDualMapping husk_ios_jit_allocate_real(size_t bytes);
 
 static HuskDualMapping husk_prewarmed;
 static bool husk_prewarm_done;
+
+/* Which legacy (no trap servicer) route made the region, for Settings: NULL
+ * until one does. Upstream 1.1 reports "MAP_JIT" or "plain" here; this branch
+ * reports the legacy CS_DEBUGGED attempt name (plain-RX, MAP_JIT, ...). */
+static const char *volatile g_self_route;
+HUSK_EXPORT const char *husk_ios_jit_self_route(void) { return g_self_route; }
 static atomic_int g_mapjit_cached;          /* 0 unknown, 1 yes, -1 no */
 static atomic_int g_mapjit_cached_debugged; /* -1 unknown, 0/1 last CS_DEBUGGED */
 
@@ -413,6 +420,12 @@ HUSK_EXPORT bool husk_ios_jit_prewarm(size_t bytes)
     fprintf(stderr, "[husk-jit] prewarm %s: %zu bytes\n",
             husk_prewarmed.rw_addr ? "OK" : "FAILED", bytes);
     return husk_prewarmed.rw_addr != NULL;
+}
+
+/* The held region, for the native runtime (translation-layer/husk-tl-load.c looks this up by name). */
+HUSK_EXPORT HuskDualMapping *husk_ios_jit_get_mapping(void)
+{
+    return husk_prewarmed.rw_addr ? &husk_prewarmed : NULL;
 }
 
 HuskDualMapping husk_ios_jit_allocate(size_t bytes)
@@ -617,6 +630,7 @@ static HuskDualMapping husk_ios_jit_allocate_legacy(size_t bytes)
         }
 
         atomic_store(&g_jit_available, true);
+        g_self_route = attempts[i].name;
         HUSK_LOG("legacy JIT %s: PASS -- executable dual-map live under CS_DEBUGGED",
                  attempts[i].name);
         return region;
@@ -840,6 +854,7 @@ void husk_ios_jit_detach(void) {}
 bool husk_ios_jit_is_available(void) { return false; }
 bool husk_ios_jit_mapjit_works(void) { return false; }
 void husk_ios_jit_invalidate_probe_cache(void) {}
+const char *husk_ios_jit_self_route(void) { return 0; }
 void husk_ios_jit_log_footprint(const char *tag) { (void)tag; }
 size_t husk_ios_available_memory(void) { return 0; }
 

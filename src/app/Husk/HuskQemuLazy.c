@@ -273,6 +273,14 @@ void husk_ios_jit_invalidate_probe_cache(void)
     if (!husk_ensure_qemu_loaded() || !p_husk_ios_jit_invalidate_probe_cache) return;
     p_husk_ios_jit_invalidate_probe_cache();
 }
+/* Settings only: never forces the dlopen. NULL until libqemu is loaded and a
+ * legacy (CS_DEBUGGED) region has been made. */
+const char *husk_ios_jit_self_route(void)
+{
+    if (!g_qemu) return NULL;
+    const char *(*fn)(void) = (const char *(*)(void))dlsym(g_qemu, "husk_ios_jit_self_route");
+    return fn ? fn() : NULL;
+}
 void husk_ios_jit_detach(void)
 {
     if (!husk_ensure_qemu_loaded() || !p_husk_ios_jit_detach) return;
